@@ -1,0 +1,25 @@
+[package]
+name = "rembro"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Open a browser that uses the network of an SSH host, container, sandbox or Kubernetes pod"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/ScriptSmith/rembro"
+readme = "README.md"
+keywords = ["browser", "docker", "kubernetes", "ssh", "proxy"]
+categories = ["command-line-utilities", "development-tools", "network-programming"]
+exclude = ["/.github", "/scripts", "/target", "/dist", "/.env"]
+
+[dependencies]
+clap = { version = "4.5", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions", "wrap_help"] }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  ZIGLANG_VERSION: "0.16.0"
+  CARGO_ZIGBUILD_VERSION: "0.24.1"
+  TARGETS: >-
+    x86_64:x86_64-unknown-linux-musl
+    aarch64:aarch64-unknown-linux-musl
+    armv7:armv7-unknown-linux-musleabihf
+
+jobs:
+  rembro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,armv7-unknown-linux-musleabihf
+      - name: Install zig and cargo-zigbuild
+        run: |
+          python3 -m venv "$RUNNER_TEMP/zig"
+          "$RUNNER_TEMP/zig/bin/pip" install --quiet "ziglang==$ZIGLANG_VERSION" "cargo-zigbuild==$CARGO_ZIGBUILD_VERSION"
+          echo "$RUNNER_TEMP/zig/bin" >> "$GITHUB_PATH"
+      - run: cargo test
+      - name: Build
+        run: |
+          mkdir -p out
+          for t in $TARGETS; do
+            cargo zigbuild --release --target "${t#*:}"
+            cp "target/${t#*:}/release/rembro" "out/rembro-${t%%:*}"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rembro
+          path: out/
+
+  waypipe:
+    runs-on: ubuntu-latest
+    env:
+      WAYPIPE_RUST_TOOLCHAIN: "1.100.0"
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libclang-dev pkg-config python3-venv
+      - run: echo "WAYPIPE_BUILD_DIR=$RUNNER_TEMP/waypipe" >> "$GITHUB_ENV"
+      - name: Build
+        run: |
+          for t in $TARGETS; do
+            scripts/build-waypipe.sh "${t#*:}" "out/waypipe-${t%%:*}"
+          done
+      - name: Collect source and licenses
+        run: scripts/waypipe-source.sh "$WAYPIPE_BUILD_DIR" out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: waypipe
+          path: out/
+
+  release:
+    needs: [rembro, waypipe]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # Each archive holds rembro for its architecture, plus the agents and waypipe
+      # builds that rembro copies into targets.
+      - name: Package
+        run: |
+          cd dist
+          chmod +x rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7
+          for t in $TARGETS; do
+            arch=${t%%:*}
+            pkg=rembro-$arch-linux
+            mkdir -p "$pkg/licenses"
+            cp "rembro-$arch" "$pkg/rembro"
+            for o in $TARGETS; do
+              [ "${o%%:*}" = "$arch" ] || cp "rembro-${o%%:*}" "$pkg/"
+              cp "waypipe-${o%%:*}" "$pkg/"
+            done
+            cp -r ../README.md ../docs ../LICENSE-MIT ../LICENSE-APACHE "$pkg/"
+            cp licenses/* "$pkg/licenses/"
+            tar -czf "$pkg.tar.gz" "$pkg"
+          done
+          sha256sum rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
+            rembro-*-linux.tar.gz waypipe-source.tar.gz > SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo "The waypipe binaries are modified builds of waypipe 0.11.3 (GPL-3.0-or-later);"
+            echo "see licenses/waypipe-NOTICE.md in each archive. waypipe-source.tar.gz is their source."
+          } > notes.md
+          cd dist
+          gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes-file ../notes.md \
+            rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
+            rembro-*-linux.tar.gz waypipe-source.tar.gz SHA256SUMS
