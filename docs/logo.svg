@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <style>
+    .pop { animation: pop .9s .3s both }
+    .rock { transform-origin: 124px 196px; animation: rock 3.6s 1.2s infinite }
+    @keyframes pop {
+      0% { transform: translateY(150px); animation-timing-function: cubic-bezier(.2, .7, .3, 1) }
+      60% { transform: translateY(-12px); animation-timing-function: ease-in-out }
+      80% { transform: translateY(4px); animation-timing-function: ease-in-out }
+      100% { transform: none }
+    }
+    @keyframes rock {
+      0% { transform: none; animation-timing-function: cubic-bezier(.3, .6, .6, 1) }
+      25% { transform: rotate(2.5deg); animation-timing-function: ease-in-out }
+      75% { transform: rotate(-2.5deg); animation-timing-function: cubic-bezier(.4, 0, .7, .4) }
+      100% { transform: none }
+    }
+    .on { fill: #7ce8a8 }
+    .dim { fill: #4a9e74 }
+    .flick { animation: flick 2.9s infinite }
+    .flick.slow { animation-duration: 3.7s; animation-delay: -1.3s }
+    .blip { animation: blip 4.3s infinite }
+    .blip.slow { animation-duration: 5.1s; animation-delay: -2.2s }
+    @keyframes flick { 0%, 38%, 46%, 55%, 61%, 100% { fill: #7ce8a8 } 41%, 43%, 58% { fill: #4a9e74 } }
+    @keyframes blip { 0%, 60%, 74%, 100% { fill: #4a9e74 } 64%, 70% { fill: #7ce8a8 } }
+    @media (prefers-reduced-motion: reduce) { .pop, .rock, .flick, .blip { animation: none } }
+  </style>
+  <defs>
+    <g id="hand">
+      <rect x="196" y="134" width="26" height="40" rx="6"/>
+      <rect x="188" y="60" width="24" height="50" rx="12"/>
+      <rect x="187" y="94" width="38" height="52" rx="13"/>
+      <rect x="200" y="94" width="40" height="18" rx="9"/>
+      <rect x="200" y="111" width="38" height="17" rx="8.5"/>
+      <rect x="200" y="127" width="35" height="18" rx="9"/>
+    </g>
+    <clipPath id="above">
+      <rect x="-20" y="-40" width="300" height="236"/>
+    </clipPath>
+  </defs>
+  <g stroke="#1c2230" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <g clip-path="url(#above)">
+      <g class="pop">
+        <g class="rock">
+          <g transform="rotate(-8 116 170)">
+            <rect x="48" y="30" width="136" height="150" rx="16" fill="#f26b38"/>
+            <path d="M48 68H184V180H48Z" fill="#fff4e3"/>
+            <rect x="124" y="43" width="44" height="12" rx="6" fill="#fff4e3" stroke="none"/>
+            <g fill="#fff4e3" stroke="none">
+              <circle cx="70" cy="49" r="6"/>
+              <circle cx="88" cy="49" r="6"/>
+              <circle cx="106" cy="49" r="6"/>
+            </g>
+            <circle cx="96" cy="100" r="8" fill="#1c2230" stroke="none"/>
+            <circle cx="136" cy="100" r="8" fill="#1c2230" stroke="none">
+              <animate attributeName="opacity" values="1;0;1" keyTimes="0;.05;.13" calcMode="discrete" dur="7s" begin="1.4s" repeatCount="indefinite"/>
+            </circle>
+            <path d="M128 102Q136 94 144 102" fill="none" stroke-width="7" opacity="0">
+              <animate attributeName="opacity" values="0;1;0" keyTimes="0;.05;.13" calcMode="discrete" dur="7s" begin="1.4s" repeatCount="indefinite"/>
+            </path>
+            <path d="M100 122Q116 136 132 122" fill="none">
+              <animate attributeName="d" dur="7s" begin="1.4s" repeatCount="indefinite" calcMode="spline"
+                values="M100 122Q116 136 132 122;M95 119Q116 143 137 119;M95 119Q116 143 137 119;M100 122Q116 136 132 122;M100 122Q116 136 132 122"
+                keyTimes="0;.04;.22;.3;1" keySplines=".4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+            </path>
+          </g>
+          <g transform="rotate(6 214 140)">
+            <use href="#hand"/>
+            <use href="#hand" fill="#fff4e3" stroke="none"/>
+            <path d="M215 111.5H233M215 127.5H230" fill="none" stroke-width="6"/>
+          </g>
+        </g>
+      </g>
+    </g>
+    <rect x="20" y="150" width="216" height="82" rx="16" fill="#f26b38"/>
+    <path d="M20 191H236" fill="none"/>
+    <path d="M112 170.5H210M112 211.5H210" fill="none" stroke-width="8"/>
+    <g stroke="none">
+      <circle class="on" cx="44" cy="170.5" r="6"/>
+      <circle class="on flick" cx="64" cy="170.5" r="6"/>
+      <circle class="dim blip" cx="84" cy="170.5" r="6"/>
+      <circle class="on" cx="44" cy="211.5" r="6"/>
+      <circle class="on flick slow" cx="64" cy="211.5" r="6"/>
+      <circle class="dim blip slow" cx="84" cy="211.5" r="6"/>
+    </g>
+  </g>
+</svg>

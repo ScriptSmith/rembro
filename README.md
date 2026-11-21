@@ -1,8 +1,12 @@
-# rembro
+<p align="center"><img src="docs/logo.svg" alt="A browser giving a thumbs-up from inside a server" width="160"></p>
 
-rembro opens a browser on your desktop that connects from inside an SSH server, Docker container or Kubernetes pod. `localhost:3000` is the dev server in the container, and names like `db` or `api.shop.svc` resolve the way they do in there, so you never forward a port.
+# rembro: remote browser
+
+rembro opens a web browser that uses the networking of an SSH server, container, sandbox, or VM. `localhost:3000` is the dev server in the container, and names like `db` or `api.shop.svc` resolve the way they do in there, so you never forward a port.
 
 Run `rembro ssh:devbox` and a tab opens for every web server listening on devbox. Servers that start later get a tab too.
+
+Run with the `--debug` flag, and let your agent drive the browser via playwright.
 
 ```sh
 rembro ssh:devbox                                # a tab for each dev server on devbox
