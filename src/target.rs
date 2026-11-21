@@ -4,17 +4,20 @@ use std::process::Command;
 
 use crate::util::{sh_quote, slug, split_words};
 
-pub const FORMS: &str = "local, ssh:[USER@]HOST[:PORT], docker:CONTAINER, podman:CONTAINER, sbx:SANDBOX, \
-k8s:[NAMESPACE/]POD[/CONTAINER], incus:INSTANCE, lxc:INSTANCE or exec:COMMAND";
+pub const FORMS: &str = "local, ssh:[USER@]HOST[:PORT], docker:CONTAINER, podman:CONTAINER, nerdctl:CONTAINER, \
+apple-container:CONTAINER, sbx:SANDBOX, k8s:[NAMESPACE/]POD[/CONTAINER], incus:INSTANCE, lxc:INSTANCE, wsl:DISTRO or \
+exec:COMMAND";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Target {
     Local,
     Ssh { dest: String, port: Option<u16> },
     Container { engine: &'static str, name: String },
+    AppleContainer { name: String },
     Sbx { name: String },
     K8s { namespace: Option<String>, pod: String, container: Option<String> },
     Incus { cli: &'static str, name: String },
+    Wsl { distro: String },
     Exec { argv: Vec<String> },
 }
 
@@ -50,6 +53,7 @@ impl Target {
                 };
                 Target::Container { engine, name: need("a container name")? }
             }
+            "apple-container" => Target::AppleContainer { name: need("a container name")? },
             "sbx" => Target::Sbx { name: need("a sandbox name")? },
             "k8s" | "kube" | "kubectl" => {
                 let rest = need("a pod name")?;
@@ -71,6 +75,7 @@ impl Target {
             }
             "incus" => Target::Incus { cli: "incus", name: need("an instance name")? },
             "lxc" => Target::Incus { cli: "lxc", name: need("an instance name")? },
+            "wsl" => Target::Wsl { distro: need("a distribution name, as wsl --list shows it")? },
             "exec" => {
                 let argv = split_words(rest).map_err(|e| format!("exec: {e}"))?;
                 if argv.is_empty() {
@@ -90,6 +95,7 @@ impl Target {
                 slug(&format!("ssh-{dest}{}", port.map(|p| format!("-{p}")).unwrap_or_default()))
             }
             Target::Container { engine, name } => slug(&format!("{engine}-{name}")),
+            Target::AppleContainer { name } => slug(&format!("apple-container-{name}")),
             Target::Sbx { name } => slug(&format!("sbx-{name}")),
             Target::K8s { namespace, pod, container } => slug(&format!(
                 "k8s-{}{pod}{}",
@@ -97,6 +103,7 @@ impl Target {
                 container.as_ref().map(|c| format!("-{c}")).unwrap_or_default()
             )),
             Target::Incus { cli, name } => slug(&format!("{cli}-{name}")),
+            Target::Wsl { distro } => slug(&format!("wsl-{distro}")),
             Target::Exec { argv } => slug(&format!("exec-{}", argv.join("-"))),
         }
     }
@@ -122,6 +129,10 @@ impl Target {
                 cmd = Command::new(engine);
                 cmd.args(["exec", "-i", name]).args(argv);
             }
+            Target::AppleContainer { name } => {
+                cmd = Command::new("container");
+                cmd.args(["exec", "-i", name]).args(argv);
+            }
             Target::Sbx { name } => {
                 cmd = Command::new("sbx");
                 cmd.args(["exec", "-i", name]).args(argv);
@@ -141,6 +152,10 @@ impl Target {
             Target::Incus { cli, name } => {
                 cmd = Command::new(cli);
                 cmd.args(["exec", "--mode=non-interactive", name, "--"]).args(argv);
+            }
+            Target::Wsl { distro } => {
+                cmd = Command::new("wsl.exe");
+                cmd.args(["--distribution", distro, "--exec"]).args(argv);
             }
             Target::Exec { argv: prefix } => {
                 cmd = Command::new(&prefix[0]);
@@ -164,6 +179,9 @@ mod tests {
             Target::Ssh { dest: "me@box".into(), port: Some(2222) }
         );
         assert_eq!(Target::parse("sbx:qut").unwrap(), Target::Sbx { name: "qut".into() });
+        assert_eq!(Target::parse("apple-container:web").unwrap(), Target::AppleContainer { name: "web".into() });
+        assert!(Target::parse("container:web").is_err());
+        assert_eq!(Target::parse("wsl:Ubuntu-24.04").unwrap(), Target::Wsl { distro: "Ubuntu-24.04".into() });
         assert_eq!(
             Target::parse("k8s:shop/api/app").unwrap(),
             Target::K8s { namespace: Some("shop".into()), pod: "api".into(), container: Some("app".into()) }
@@ -174,6 +192,7 @@ mod tests {
         );
         assert!(Target::parse("qut").is_err());
         assert!(Target::parse("docker:").is_err());
+        assert!(Target::parse("wsl:").is_err());
         assert!(Target::parse("k8s:a/b/c/d").is_err());
     }
 
@@ -182,5 +201,6 @@ mod tests {
         assert_eq!(Target::parse("sbx:qut").unwrap().slug(), "sbx-qut");
         assert_eq!(Target::parse("ssh:me@box:22").unwrap().slug(), "ssh-me@box-22");
         assert_eq!(Target::parse("k8s:shop/api").unwrap().slug(), "k8s-shop-api");
+        assert_eq!(Target::parse("apple-container:web").unwrap().slug(), "apple-container-web");
     }
 }

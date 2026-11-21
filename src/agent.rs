@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 
 use crate::mux::{Handler, Mux, Sock};
 use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL};
-use crate::util;
+use crate::{sys, util};
 
 pub fn self_hash() -> io::Result<String> {
     Ok(format!("{:016x}", util::fnv64(&fs::read("/proc/self/exe")?)))
@@ -155,15 +155,19 @@ impl Agent {
         });
         Info {
             arch,
-            uid: util::uid(),
+            uid: sys::uid(),
             home: self.home(),
-            runtime_dir,
-            hostname: util::hostname(),
+            runtime_dir: runtime_dir.clone(),
+            hostname: sys::hostname(),
             shm_bytes,
             proxy: self.proxy.https.as_ref().or(self.proxy.http.as_ref()).map(|p| format!("{}:{}", p.host, p.port)),
             protocol: PROTOCOL,
             agent_dir: agent_dir().to_string_lossy().into_owned(),
             os: os_ids(),
+            display: std::env::var("DISPLAY").ok().filter(|d| !d.is_empty()),
+            wayland_display: std::env::var("WAYLAND_DISPLAY")
+                .ok()
+                .filter(|d| !d.is_empty() && (d.starts_with('/') || runtime_dir.is_some())),
         }
     }
 
@@ -293,7 +297,7 @@ impl Agent {
                     let mut line = Vec::new();
                     let _ = io::BufReader::new(&s).take(8193).read_until(b'\n', &mut line);
                     let url = String::from_utf8_lossy(&line).trim().to_string();
-                    let reply = if is_web_url(&url) {
+                    let reply = if util::is_web_url(&url) {
                         mux.event(&Event::Open { url });
                         "ok\n"
                     } else {
@@ -378,7 +382,7 @@ impl Agent {
                 Ok(())
             });
         }
-        util::unblock_signals(&mut cmd);
+        sys::unblock_signals(&mut cmd);
         let (tx, rx) = mpsc::channel();
         self.spawner.send((cmd, tx)).map_err(|_| "the agent is shutting down".to_string())?;
         let mut child = rx
@@ -466,7 +470,7 @@ fn capture(argv: &[String], timeout: Duration) -> Result<(Option<i32>, String), 
     let Some((prog, args)) = argv.split_first() else { return Err("nothing to run".into()) };
     let mut cmd = Command::new(prog);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    util::unblock_signals(&mut cmd);
+    sys::unblock_signals(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("{prog}: {e}"))?;
     let out = child.stdout.take().unwrap();
     let reader = thread::spawn(move || {
@@ -585,26 +589,18 @@ fn extra_cas() -> Vec<(String, String)> {
     out
 }
 
-/// Whether `url` is an http or https URL with no spaces or control characters.
-pub fn is_web_url(url: &str) -> bool {
-    let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://"))
-        && url.len() <= 8192
-        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
-}
-
 /// A private per-user directory for the URL sockets: $XDG_RUNTIME_DIR/rembro, or
 /// /tmp/rembro-UID. Returns None if the directory is not ours alone.
 fn socket_dir(runtime: Option<&str>) -> Option<PathBuf> {
     let dir = match runtime {
         Some(r) if r.starts_with('/') && Path::new(r).is_dir() => Path::new(r).join("rembro"),
-        _ => PathBuf::from(format!("/tmp/rembro-{}", util::uid())),
+        _ => PathBuf::from(format!("/tmp/rembro-{}", sys::uid())),
     };
     let _ = fs::create_dir(&dir);
     let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
     let m = fs::symlink_metadata(&dir).ok()?;
     use std::os::unix::fs::MetadataExt;
-    (m.is_dir() && m.uid() == util::uid() && m.mode() & 0o077 == 0).then_some(dir)
+    (m.is_dir() && m.uid() == sys::uid() && m.mode() & 0o077 == 0).then_some(dir)
 }
 
 /// `rembro open [--fallback CMD] URL`, run by the BROWSER and xdg-open commands in the
@@ -615,7 +611,7 @@ pub fn open_main(args: &[String]) -> ! {
         _ => (None, args),
     };
     if let [url] = args
-        && is_web_url(url)
+        && util::is_web_url(url)
     {
         match send_url(url) {
             Ok(()) => std::process::exit(0),
@@ -899,21 +895,5 @@ mod tests {
         let p = ProxyUrl::parse("http://u%40x:p@proxy:8080/").unwrap();
         assert_eq!(p.auth.as_deref(), Some(util::base64(b"u@x:p").as_str()));
         assert!(ProxyUrl::parse("socks5://proxy:1080").is_none());
-    }
-}
-
-#[cfg(test)]
-mod url_tests {
-    use super::is_web_url;
-
-    #[test]
-    fn web_urls() {
-        assert!(is_web_url("https://example.org/a?b=c"));
-        assert!(is_web_url("HTTP://localhost:3000"));
-        assert!(!is_web_url("--renderer-cmd-prefix=sh -c id"));
-        assert!(!is_web_url("file:///etc/passwd"));
-        assert!(!is_web_url("javascript:alert(1)"));
-        assert!(!is_web_url("https://a b"));
-        assert!(!is_web_url("https://a\nb"));
     }
 }

@@ -8,6 +8,7 @@
 use crate::cli::Install;
 use crate::host::{self, HostEvent, Session};
 use crate::proto::{Call, Event};
+use crate::sys;
 
 const SCRIPT: &str = r#"
 b=$1
@@ -77,7 +78,7 @@ pub fn run(i: &Install, s: &Session) -> Result<i32, String> {
                 return Ok(host::exit_code(code, signal));
             }
             Ok(HostEvent::Signal(sig)) => {
-                let _ = s.call::<serde_json::Value>(&Call::Kill { proc, signal: libc::SIGTERM });
+                let _ = s.call::<serde_json::Value>(&Call::Kill { proc, signal: sys::SIGTERM });
                 return Ok(128 + sig);
             }
             Ok(HostEvent::AgentClosed) | Err(_) => return Err(format!("the connection to {} closed", s.label)),

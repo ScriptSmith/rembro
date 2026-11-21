@@ -1,24 +1,40 @@
 # Using rembro
 
-This page covers targets, choosing a browser, profiles, opening pages, letting a program drive the browser, `rembro run`, `rembro install` and the command-line options.
+This page covers targets and VMs, choosing a browser, profiles, opening pages, letting a program drive the browser, `rembro run`, `rembro install`, displays on macOS and Windows, and the command-line options.
 
 ## Targets
 
 | Target | rembro runs the agent with |
 |---|---|
-| `local` | this machine |
+| `local` | this machine, on Linux only |
 | `ssh:[USER@]HOST[:PORT]` | `ssh HOST`, using your ssh config |
 | `docker:CONTAINER`, `podman:CONTAINER`, `nerdctl:CONTAINER` | `docker exec -i`, `podman exec -i` or `nerdctl exec -i` |
+| `apple-container:CONTAINER` | `container exec -i`, with Apple's container tool on macOS |
 | `sbx:SANDBOX` | `sbx exec -i` |
 | `k8s:[NAMESPACE/]POD[/CONTAINER]` | `kubectl exec -i`, in kubectl's current context |
 | `incus:INSTANCE`, `lxc:INSTANCE` | `incus exec` or `lxc exec` |
+| `wsl:DISTRO` | `wsl.exe --distribution DISTRO --exec`, on Windows |
 | `exec:COMMAND` | `COMMAND sh -c ...`, for example `exec:'docker compose exec -T web'` or `exec:'kubectl --context prod exec -i web --'` |
 
 `localhost` is another name for `local`, and `kube:` and `kubectl:` are other names for `k8s:`. A `//` after the colon is ignored, so `ssh://me@box:2222` also works.
 
 `exec:` splits COMMAND into words the way a shell would, without expansions, and appends its own arguments to them as separate words. That suits the `exec` subcommands of container tools. It does not quote the arguments for a remote shell, so use `ssh:` for SSH.
 
-The target only needs `sh` and a writable directory. [How it works](how-it-works.md#the-agent) describes what rembro copies there.
+The target must run Linux, and needs only `sh` and a writable directory. [How it works](how-it-works.md#the-agent) describes what rembro copies there.
+
+### VMs
+
+rembro reaches a VM over SSH, or through any command that runs programs in it:
+
+| VM | Target |
+|---|---|
+| QEMU with user networking, started with `-nic user,hostfwd=tcp:127.0.0.1:2222-:22` | `ssh:me@localhost:2222` |
+| libvirt, UTM, Hyper-V, Parallels, VirtualBox | `ssh:me@ADDRESS` |
+| Lima | `exec:'limactl shell default'` |
+| Multipass | `exec:'multipass exec myvm --'` |
+| WSL | `wsl:Ubuntu` |
+
+One SSH connection is enough: rembro reaches every port in the guest through it, including the ones that QEMU's user networking doesn't forward. A guest that emulates another architecture gets the matching agent when rembro has a build for it (x86_64, aarch64 or armv7). For any other, such as riscv64, pass a static build with `--agent`.
 
 ## Choosing a browser
 
@@ -29,6 +45,8 @@ The target only needs `sh` and a writable directory. [How it works](how-it-works
 - `epiphany` (GNOME Web), `minibrowser` (WebKitGTK's MiniBrowser)
 - the Playwright builds `playwright-chromium`, `playwright-firefox` and `playwright-webkit`, from `~/.cache/ms-playwright`
 - `webkit`, which takes the first of Epiphany, MiniBrowser and Playwright WebKit that is installed
+
+On macOS, rembro looks for these browsers in `/Applications` and `~/Applications`, and on Windows in `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%LOCALAPPDATA%`, where their installers put them. The Playwright builds come from `~/Library/Caches/ms-playwright` on macOS and `%LOCALAPPDATA%\ms-playwright` on Windows. Epiphany, MiniBrowser and Playwright WebKit are Linux programs, so with a macOS or Windows host they work only with `--remote`.
 
 `chromium` and `firefox` also fall back to the Playwright builds. The default, `auto`, takes the first browser it finds in this order: Chromium, Chrome, Brave, Edge, Vivaldi, Playwright Chromium, Firefox, LibreWolf, Zen, Playwright Firefox, Epiphany, MiniBrowser, Playwright WebKit. When the browser runs here, rembro looks on this machine. With `--remote` it looks in the target, and if it finds nothing it suggests `rembro install`. rembro skips the wrapper scripts that Ubuntu installs in place of snap packages, since they only ask you to install the snap.
 
@@ -48,10 +66,10 @@ Arguments after `--` go to the browser: `rembro sbx:myapp -- --incognito`.
 
 ## Profiles
 
-rembro never uses your regular browser profile unless you ask it to. Profiles live in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-myapp`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. The name is `default`, or `agent` with `--debug`, so a browser that a program can drive never shares cookies with the one you use.
+rembro never uses your regular browser profile unless you ask it to. Profiles live in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-myapp`. On macOS they live in `~/Library/Application Support/rembro/profiles`, and on Windows in `%LOCALAPPDATA%\rembro\profiles`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. The name is `default`, or `agent` with `--debug`, so a browser that a program can drive never shares cookies with the one you use.
 
 - `--profile NAME` picks another name.
-- `--profile PATH` uses any directory. rembro treats a value as a path when it contains `/` or is `~`.
+- `--profile PATH` uses any directory. rembro treats a value as a path when it contains `/` (or on Windows, `\`) or is `~`.
 - `--temp-profile` uses a new profile that is deleted when the browser exits. It can't be combined with `--profile`.
 
 To start from your regular logins without touching them, copy your regular profile into rembro's directory, for example `cp -r ~/.config/chromium ~/.local/share/rembro/profiles/sbx-myapp/chromium/default`.
@@ -106,7 +124,7 @@ Without `--remote`, the browser runs on this machine, so a program in the target
 
 `rembro run TARGET COMMAND [ARGS]...` runs any program in the target with the same display, sound and `BROWSER` setup as `--remote`. Its output comes back on rembro's stdout and stderr, and rembro exits with its exit status. Its stdin is not connected, so use `ssh` or `docker exec -it` for interactive terminal programs.
 
-rembro's options go before the command, and everything from the command on belongs to it. `rembro run` takes `--display`, `--x11-trusted`, `--no-audio`, `--agent`, `--quiet` and `--verbose`. `--display none` runs a program without a display. When this session has neither Wayland nor X11, `rembro run` prints a warning and does the same.
+rembro's options go before the command, and everything from the command on belongs to it. `rembro run` takes `--display`, `--x11-trusted`, `--no-audio`, `--agent`, `--quiet` and `--verbose`. `--display none` runs a program without a display. When neither this machine nor the target has a display, `rembro run` prints a warning and does the same.
 
 ## Installing a browser in the target
 
@@ -117,6 +135,17 @@ Where the target has Node.js (`npx`) on x86_64 or aarch64, it runs `npx -y playw
 That is not possible on Ubuntu, because Ubuntu packages Chromium and Firefox as snaps, which don't run in containers. There rembro stops and suggests installing Node.js and npm so that it can use Playwright's builds.
 
 rembro acts as root when the target runs it as root or has passwordless `sudo`. When it can't become root, it prints the command to run instead.
+
+## Displays on macOS and Windows
+
+`--remote` and `rembro run` show windows from the target through waypipe or X11 ([How it works](how-it-works.md#display-forwarding)). macOS and Windows have no Wayland sessions, so they need an X server:
+
+- On macOS, install [XQuartz](https://www.xquartz.org), then log out and back in. Programs then have `DISPLAY` set to XQuartz's socket, and connecting to it starts XQuartz.
+- On Windows, start an X server such as VcXsrv or X410, and set `DISPLAY=127.0.0.1:0`.
+
+When this machine has no display and the target has one of its own, programs use the target's display. That is how a WSL distribution with WSLg shows its windows on Windows.
+
+Sound plays here when `PULSE_SERVER` names a PulseAudio server on this machine, either a `unix:` socket or a `tcp:` address such as `tcp:127.0.0.1:4713`. Otherwise programs keep the target's own sound server, which in WSL is WSLg's.
 
 ## Options
 
@@ -160,3 +189,5 @@ rembro install [OPTIONS] TARGET [BROWSER]
 - Epiphany reads its proxy settings from GSettings, so when it runs here rembro gives it a private `XDG_CONFIG_HOME` inside its profile, and it doesn't see your GNOME settings.
 - Opening more pages in a Firefox that runs in the target can fail: on Wayland, Firefox hands pages to its running instance over D-Bus, and containers rarely have a session bus.
 - UDP is not carried, so QUIC and WebRTC media don't go through the target when the browser runs here. Use `--remote` for those.
+- The `local` target works only on Linux, because the agent is a Linux program.
+- On Windows, `--trust-target-ca` works with Chromium browsers only, and Firefox on macOS needs `certutil` from Homebrew's `nss` package for it ([Security](security.md#trusting-the-targets-ca-certificates)).

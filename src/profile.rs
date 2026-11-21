@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::browser::Family;
-use crate::{certs, util};
+use crate::{certs, sys, util};
 
 /// Present in profiles that rembro created.
 const OWNER: &str = "rembro-profile";
@@ -31,8 +31,7 @@ pub fn created_by_rembro(profile: &Path) -> bool {
 pub fn session_target(profile: &Path) -> Option<String> {
     let text = fs::read_to_string(profile.join(SESSION)).ok()?;
     let (pid, target) = text.split_once('\n')?;
-    let cmdline = fs::read(format!("/proc/{}/cmdline", pid.trim())).ok()?;
-    String::from_utf8_lossy(&cmdline).contains("rembro").then(|| target.trim().to_string())
+    sys::process_name(pid.trim().parse().ok()?)?.contains("rembro").then(|| target.trim().to_string())
 }
 
 /// Removes the mark of a rembro session that ended without removing it.

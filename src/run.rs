@@ -6,7 +6,7 @@ use crate::cli::{Common, Run};
 use crate::host::{self, HostEvent, Limiter, Session};
 use crate::proto::{Call, Event};
 use crate::remote;
-use crate::util;
+use crate::sys;
 
 pub fn run(r: &Run, s: &Session, common: &Common) -> Result<i32, String> {
     let dir: String = s.call(&Call::Mkdtemp)?;
@@ -73,7 +73,7 @@ fn open(common: &Common, s: &Session, url: &str) {
     if !s.verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    util::unblock_signals(&mut cmd);
+    sys::unblock_signals(&mut cmd);
     match cmd.spawn() {
         Ok(mut child) => {
             std::thread::spawn(move || child.wait());

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Bumped whenever a message changes shape, so mismatched builds fail clearly.
-pub const PROTOCOL: u32 = 3;
+pub const PROTOCOL: u32 = 4;
 
 /// A request from rembro to the agent. Each one gets exactly one reply.
 #[derive(Serialize, Deserialize, Debug)]
@@ -125,4 +125,7 @@ pub struct Info {
     pub agent_dir: String,
     /// ID and ID_LIKE from /etc/os-release.
     pub os: Vec<String>,
+    /// The target's own X11 and Wayland displays, such as WSLg's in WSL.
+    pub display: Option<String>,
+    pub wayland_display: Option<String>,
 }

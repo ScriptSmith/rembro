@@ -9,20 +9,16 @@ use std::time::Duration;
 use crate::host::Conn;
 use crate::mux::{Mux, Sock};
 use crate::proto::Open;
+#[cfg(target_os = "linux")]
 use crate::util;
 
 /// Starts the server and returns its port.
 pub fn serve(conn: Arc<Conn>, verbose: bool) -> io::Result<u16> {
     let l = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
     let port = l.local_addr()?.port();
-    let me = util::uid();
     thread::spawn(move || {
         for s in l.incoming().flatten() {
-            // Other users on this machine could otherwise use the server to reach into the target.
-            if let (Ok(local), Ok(peer)) = (s.local_addr(), s.peer_addr())
-                && let Some(uid) = util::tcp_peer_uid(local, peer)
-                && uid != me
-            {
+            if let Some(uid) = other_user(&s) {
                 if verbose {
                     eprintln!("rembro: refused a SOCKS connection from uid {uid}");
                 }
@@ -39,6 +35,19 @@ pub fn serve(conn: Arc<Conn>, verbose: bool) -> io::Result<u16> {
         }
     });
     Ok(port)
+}
+
+/// The user who made a connection, if it is not this one. Other users on this machine could
+/// otherwise use the server to reach into the target. Only Linux shows who owns a connection.
+#[cfg(target_os = "linux")]
+fn other_user(s: &TcpStream) -> Option<u32> {
+    let uid = util::tcp_peer_uid(s.local_addr().ok()?, s.peer_addr().ok()?)?;
+    (uid != crate::sys::uid()).then_some(uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn other_user(_s: &TcpStream) -> Option<u32> {
+    None
 }
 
 fn reply_code(err: &str) -> u8 {

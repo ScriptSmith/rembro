@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -42,13 +43,36 @@ const CHUNK: usize = 32 << 10;
 
 pub enum Sock {
     Tcp(TcpStream),
+    #[cfg(unix)]
     Unix(UnixStream),
 }
 
 impl Sock {
+    /// Two connected sockets: a Unix socket pair, or on Windows a TCP connection over loopback.
+    #[cfg(unix)]
+    pub fn pair() -> io::Result<(Sock, Sock)> {
+        let (a, b) = UnixStream::pair()?;
+        Ok((Sock::Unix(a), Sock::Unix(b)))
+    }
+
+    #[cfg(not(unix))]
+    pub fn pair() -> io::Result<(Sock, Sock)> {
+        let l = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let a = TcpStream::connect(l.local_addr()?)?;
+        let ours = a.local_addr()?;
+        // Another program could connect first; skip anything that is not our own end.
+        loop {
+            let (b, peer) = l.accept()?;
+            if peer == ours {
+                return Ok((Sock::Tcp(a), Sock::Tcp(b)));
+            }
+        }
+    }
+
     pub fn try_clone(&self) -> io::Result<Sock> {
         Ok(match self {
             Sock::Tcp(s) => Sock::Tcp(s.try_clone()?),
+            #[cfg(unix)]
             Sock::Unix(s) => Sock::Unix(s.try_clone()?),
         })
     }
@@ -56,6 +80,7 @@ impl Sock {
     pub fn set_timeout(&self, t: Option<std::time::Duration>) {
         let _ = match self {
             Sock::Tcp(s) => s.set_read_timeout(t).and(s.set_write_timeout(t)),
+            #[cfg(unix)]
             Sock::Unix(s) => s.set_read_timeout(t).and(s.set_write_timeout(t)),
         };
     }
@@ -63,6 +88,7 @@ impl Sock {
     pub fn shutdown(&self, how: Shutdown) {
         let _ = match self {
             Sock::Tcp(s) => s.shutdown(how),
+            #[cfg(unix)]
             Sock::Unix(s) => s.shutdown(how),
         };
     }
@@ -72,6 +98,7 @@ impl Read for Sock {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         match self {
             Sock::Tcp(s) => s.read(buf),
+            #[cfg(unix)]
             Sock::Unix(s) => s.read(buf),
         }
     }
@@ -81,6 +108,7 @@ impl Write for Sock {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match self {
             Sock::Tcp(s) => s.write(buf),
+            #[cfg(unix)]
             Sock::Unix(s) => s.write(buf),
         }
     }
@@ -252,6 +280,8 @@ impl Mux {
         serde_json::from_value(value).map_err(|e| format!("unexpected reply from the agent: {e}"))
     }
 
+    /// Only the agent sends events.
+    #[cfg(target_os = "linux")]
     pub fn event(&self, event: &impl Serialize) {
         self.send(EVENT, 0, &serde_json::to_vec(event).unwrap());
     }

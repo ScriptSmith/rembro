@@ -2,8 +2,6 @@
 
 use std::fs;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -16,7 +14,7 @@ use crate::host::{self, DEBUG_ID, Endpoint, HostEvent, Limiter, Session};
 use crate::proto::{Call, Event};
 use crate::target::Target;
 use crate::util::{self, PortSpec};
-use crate::{profile, socks};
+use crate::{profile, socks, sys};
 
 /// Removes a directory when dropped.
 pub struct TempDir(pub PathBuf);
@@ -33,7 +31,7 @@ fn profile_dir(cli: &Browse, s: &Session, name: &str) -> Result<(PathBuf, Option
         (p.clone(), Some(TempDir(p)))
     } else {
         match &cli.profile {
-            Some(p) if p.contains('/') || p == "~" => (util::expand_home(p, util::home().as_deref()), None),
+            Some(p) if util::is_path(p) => (util::expand_home(p, util::home().as_deref()), None),
             p => {
                 let profile = p.as_deref().unwrap_or(if cli.debug.is_some() { "agent" } else { "default" });
                 (
@@ -48,20 +46,24 @@ fn profile_dir(cli: &Browse, s: &Session, name: &str) -> Result<(PathBuf, Option
     if new {
         profile::mark_created(&path);
     }
-    if temp.is_some() || cli.profile.as_deref().is_none_or(|p| !p.contains('/')) {
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o700));
+    if temp.is_some() || cli.profile.as_deref().is_none_or(|p| !util::is_path(p)) {
+        sys::set_mode(&path, 0o700);
     }
     Ok((path, temp))
 }
 
 /// Whether a running browser already has the profile open on this machine.
+#[cfg(unix)]
 fn in_use(profile: &Path, family: Family) -> bool {
     let link = match family {
         Family::Chromium => profile.join("SingletonLock"),
         Family::Firefox => profile.join("lock"),
         _ => return false,
     };
-    let Ok(target) = fs::read_link(link) else { return false };
+    let Ok(target) = fs::read_link(link) else {
+        // Firefox on macOS makes no symlink, and locks .parentlock instead.
+        return family == Family::Firefox && sys::fcntl_locked(&profile.join(".parentlock"));
+    };
     let target = target.to_string_lossy();
     // Chromium writes HOST-PID; Firefox writes ADDRESS:+PID.
     let (host, pid) = match family {
@@ -74,10 +76,22 @@ fn in_use(profile: &Path, family: Family) -> bool {
             None => return false,
         },
     };
-    if host.is_some_and(|h| h != util::hostname()) {
+    if host.is_some_and(|h| h != sys::hostname()) {
         return false;
     }
-    pid.parse::<u32>().is_ok_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+    pid.parse::<u32>().is_ok_and(sys::pid_alive)
+}
+
+/// Whether a running browser already has the profile open on this machine. On Windows,
+/// Chromium and Firefox keep a lock file open without sharing it, and it goes when they exit.
+#[cfg(windows)]
+fn in_use(profile: &Path, family: Family) -> bool {
+    let lock = match family {
+        Family::Chromium => profile.join("lockfile"),
+        Family::Firefox => profile.join("parent.lock"),
+        _ => return false,
+    };
+    lock.exists() && fs::OpenOptions::new().write(true).open(&lock).is_err()
 }
 
 fn apply_files(files: Vec<(String, Edit)>) -> Result<(), String> {
@@ -300,7 +314,8 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
 
     let spawn = |argv: &[String], env: &[(String, String)], unset: &[String], quiet: bool| {
         let mut cmd = Command::new(&argv[0]);
-        cmd.args(&argv[1..]).stdin(Stdio::null()).process_group(0);
+        cmd.args(&argv[1..]).stdin(Stdio::null());
+        sys::own_group(&mut cmd);
         for k in unset {
             cmd.env_remove(k);
         }
@@ -308,16 +323,16 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         if quiet {
             cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
-        util::unblock_signals(&mut cmd);
+        sys::unblock_signals(&mut cmd);
         cmd.spawn().map_err(|e| format!("cannot run {}: {e}", argv[0]))
     };
     let mut child = spawn(&launch.argv, &launch.env, &launch.unset, s.quiet)?;
     let _session = (!busy).then(|| profile::SessionMark::new(&profile, &s.label));
-    let pid = child.id() as i32;
+    let pid = child.id();
     let tx = s.sender.clone();
     thread::spawn(move || {
         let (code, signal) = match child.wait() {
-            Ok(st) => (st.code(), st.signal()),
+            Ok(st) => (st.code(), sys::exit_signal(&st)),
             Err(_) => (Some(1), None),
         };
         let _ = tx.send(HostEvent::BrowserExited(code, signal));
@@ -342,9 +357,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         host::watch_ports(s, ports.clone(), exclude, seen);
     }
 
-    let term = |sig| unsafe {
-        libc::kill(-pid, sig);
-    };
+    let term = |sig| sys::signal_group(pid, sig);
     let mut limiter = Limiter::new();
     loop {
         match s.events.recv() {

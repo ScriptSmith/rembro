@@ -20,40 +20,158 @@ pub enum Family {
     PlaywrightWebkit,
 }
 
+/// The system to find browsers for: this machine's, or Linux in a target.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Os {
+    Linux,
+    Macos,
+    Windows,
+}
+
+impl Os {
+    pub const HERE: Os = if cfg!(target_os = "macos") {
+        Os::Macos
+    } else if cfg!(windows) {
+        Os::Windows
+    } else {
+        Os::Linux
+    };
+}
+
 struct Known {
     name: &'static str,
     family: Family,
-    candidates: &'static [&'static str],
+    /// Commands and paths to try on Linux, here or in a target.
+    linux: &'static [&'static str],
+    macos: &'static [&'static str],
+    windows: &'static [&'static str],
+}
+
+impl Known {
+    fn candidates(&self, os: Os) -> &'static [&'static str] {
+        match os {
+            Os::Linux => self.linux,
+            Os::Macos => self.macos,
+            Os::Windows => self.windows,
+        }
+    }
 }
 
 const KNOWN: &[Known] = &[
-    Known { name: "chromium", family: Family::Chromium, candidates: &["chromium", "chromium-browser"] },
+    Known {
+        name: "chromium",
+        family: Family::Chromium,
+        linux: &["chromium", "chromium-browser"],
+        macos: &[
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "~/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ],
+        windows: &[
+            r"%LOCALAPPDATA%\Chromium\Application\chrome.exe",
+            r"%ProgramFiles%\Chromium\Application\chrome.exe",
+        ],
+    },
     Known {
         name: "chrome",
         family: Family::Chromium,
-        candidates: &["google-chrome-stable", "google-chrome", "/opt/google/chrome/chrome"],
+        linux: &["google-chrome-stable", "google-chrome", "/opt/google/chrome/chrome"],
+        macos: &[
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        ],
+        windows: &[
+            r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+            r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+            r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+        ],
     },
-    Known { name: "brave", family: Family::Chromium, candidates: &["brave-browser", "brave", "brave-browser-stable"] },
-    Known { name: "edge", family: Family::Chromium, candidates: &["microsoft-edge-stable", "microsoft-edge"] },
-    Known { name: "vivaldi", family: Family::Chromium, candidates: &["vivaldi-stable", "vivaldi"] },
+    Known {
+        name: "brave",
+        family: Family::Chromium,
+        linux: &["brave-browser", "brave", "brave-browser-stable"],
+        macos: &[
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "~/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        ],
+        windows: &[
+            r"%ProgramFiles%\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"%ProgramFiles(x86)%\BraveSoftware\Brave-Browser\Application\brave.exe",
+            r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\Application\brave.exe",
+        ],
+    },
+    Known {
+        name: "edge",
+        family: Family::Chromium,
+        linux: &["microsoft-edge-stable", "microsoft-edge"],
+        macos: &["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+        windows: &[
+            r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
+            r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+        ],
+    },
+    Known {
+        name: "vivaldi",
+        family: Family::Chromium,
+        linux: &["vivaldi-stable", "vivaldi"],
+        macos: &["/Applications/Vivaldi.app/Contents/MacOS/Vivaldi"],
+        windows: &[
+            r"%LOCALAPPDATA%\Vivaldi\Application\vivaldi.exe",
+            r"%ProgramFiles%\Vivaldi\Application\vivaldi.exe",
+        ],
+    },
     Known {
         name: "playwright-chromium",
         family: Family::Chromium,
-        candidates: &["~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome"],
+        linux: &["~/.cache/ms-playwright/chromium-*/chrome-linux*/chrome"],
+        macos: &["~/Library/Caches/ms-playwright/chromium-*/chrome-mac*/*.app/Contents/MacOS/*"],
+        windows: &[r"%LOCALAPPDATA%\ms-playwright\chromium-*\chrome-win*\chrome.exe"],
     },
-    Known { name: "firefox", family: Family::Firefox, candidates: &["firefox", "firefox-esr"] },
-    Known { name: "librewolf", family: Family::Firefox, candidates: &["librewolf"] },
-    Known { name: "zen", family: Family::Firefox, candidates: &["zen-browser", "zen"] },
+    Known {
+        name: "firefox",
+        family: Family::Firefox,
+        linux: &["firefox", "firefox-esr"],
+        macos: &[
+            "/Applications/Firefox.app/Contents/MacOS/firefox",
+            "~/Applications/Firefox.app/Contents/MacOS/firefox",
+        ],
+        windows: &[
+            r"%ProgramFiles%\Mozilla Firefox\firefox.exe",
+            r"%ProgramFiles(x86)%\Mozilla Firefox\firefox.exe",
+            r"%LOCALAPPDATA%\Mozilla Firefox\firefox.exe",
+        ],
+    },
+    Known {
+        name: "librewolf",
+        family: Family::Firefox,
+        linux: &["librewolf"],
+        macos: &["/Applications/LibreWolf.app/Contents/MacOS/librewolf"],
+        windows: &[r"%ProgramFiles%\LibreWolf\librewolf.exe", r"%LOCALAPPDATA%\LibreWolf\librewolf.exe"],
+    },
+    Known {
+        name: "zen",
+        family: Family::Firefox,
+        linux: &["zen-browser", "zen"],
+        macos: &["/Applications/Zen.app/Contents/MacOS/zen", "/Applications/Zen Browser.app/Contents/MacOS/zen"],
+        windows: &[r"%ProgramFiles%\Zen Browser\zen.exe"],
+    },
     Known {
         name: "playwright-firefox",
         family: Family::Firefox,
-        candidates: &["~/.cache/ms-playwright/firefox-*/firefox/firefox"],
+        linux: &["~/.cache/ms-playwright/firefox-*/firefox/firefox"],
+        macos: &["~/Library/Caches/ms-playwright/firefox-*/firefox/Nightly.app/Contents/MacOS/firefox"],
+        windows: &[r"%LOCALAPPDATA%\ms-playwright\firefox-*\firefox\firefox.exe"],
     },
-    Known { name: "epiphany", family: Family::Epiphany, candidates: &["epiphany", "epiphany-browser"] },
+    Known {
+        name: "epiphany",
+        family: Family::Epiphany,
+        linux: &["epiphany", "epiphany-browser"],
+        macos: &[],
+        windows: &[],
+    },
     Known {
         name: "minibrowser",
         family: Family::Minibrowser,
-        candidates: &[
+        linux: &[
             "/usr/lib/webkitgtk-6.0/MiniBrowser",
             "/usr/libexec/webkitgtk-6.0/MiniBrowser",
             "/usr/lib/*/webkitgtk-6.0/MiniBrowser",
@@ -61,11 +179,16 @@ const KNOWN: &[Known] = &[
             "/usr/libexec/webkit2gtk-4.1/MiniBrowser",
             "/usr/lib/*/webkit2gtk-4.1/MiniBrowser",
         ],
+        macos: &[],
+        windows: &[],
     },
+    // Playwright's WebKit takes no proxy, so it is of use only in a target.
     Known {
         name: "playwright-webkit",
         family: Family::PlaywrightWebkit,
-        candidates: &["~/.cache/ms-playwright/webkit-*/pw_run.sh"],
+        linux: &["~/.cache/ms-playwright/webkit-*/pw_run.sh"],
+        macos: &[],
+        windows: &[],
     },
 ];
 
@@ -119,8 +242,8 @@ fn guess_family(name: &str) -> Option<Family> {
     }
 }
 
-/// The browsers `browser` may refer to, in order of preference.
-pub fn choices(browser: &str, family: Option<Family>) -> Result<Vec<Choice>, String> {
+/// The browsers `browser` may refer to on `os`, in order of preference.
+pub fn choices(browser: &str, family: Option<Family>, os: Os) -> Result<Vec<Choice>, String> {
     let names: &[&str] = match browser {
         "auto" | "" => DEFAULT_ORDER,
         "chromium" => &["chromium", "playwright-chromium"],
@@ -146,14 +269,14 @@ pub fn choices(browser: &str, family: Option<Family>) -> Result<Vec<Choice>, Str
         .map(|k| Choice {
             name: k.name.to_string(),
             family: k.family,
-            candidates: k.candidates.iter().map(|c| c.to_string()).collect(),
+            candidates: k.candidates(os).iter().map(|c| c.to_string()).collect(),
         })
         .collect())
 }
 
 pub fn resolve_local(browser: &str, family: Option<Family>) -> Result<Resolved, String> {
     let home = util::home();
-    for c in choices(browser, family)? {
+    for c in choices(browser, family, Os::HERE)? {
         for cand in &c.candidates {
             if let Some(p) = util::find_executable(cand, home.as_deref()) {
                 return Ok(Resolved { name: c.name, family: c.family, path: p.to_string_lossy().into_owned() });
@@ -447,9 +570,14 @@ mod tests {
         assert_eq!(guess_family("google-chrome-unstable"), Some(Family::Chromium));
         assert_eq!(guess_family("floorp"), Some(Family::Firefox));
         assert_eq!(guess_family("lynx"), None);
-        assert!(choices("lynx", None).is_err());
-        assert_eq!(choices("lynx", Some(Family::Chromium)).unwrap()[0].name, "lynx");
-        assert_eq!(choices("auto", Some(Family::Firefox)).unwrap()[0].name, "firefox");
+        assert!(choices("lynx", None, Os::Linux).is_err());
+        assert_eq!(choices("lynx", Some(Family::Chromium), Os::Linux).unwrap()[0].name, "lynx");
+        assert_eq!(choices("auto", Some(Family::Firefox), Os::Linux).unwrap()[0].name, "firefox");
+        assert_eq!(guess_family("Google Chrome for Testing"), Some(Family::Chromium));
+        assert_eq!(guess_family("msedge.exe"), Some(Family::Chromium));
+        let mac = choices("chrome", None, Os::Macos).unwrap();
+        assert!(mac[0].candidates[0].ends_with("/Contents/MacOS/Google Chrome"));
+        assert!(choices("epiphany", None, Os::Windows).unwrap()[0].candidates.is_empty());
     }
 
     #[test]

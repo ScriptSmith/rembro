@@ -1,22 +1,11 @@
 use std::cmp::Ordering;
 use std::fs;
+use std::io;
+#[cfg(target_os = "linux")]
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-/// Makes `cmd` start with no signals blocked. rembro blocks the signals it waits for, and
-/// children would otherwise inherit that, leaving them deaf to SIGTERM and Ctrl-C.
-pub fn unblock_signals(cmd: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            let mut set: libc::sigset_t = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
-            libc::pthread_sigmask(libc::SIG_SETMASK, &set, std::ptr::null_mut());
-            Ok(())
-        });
-    }
-}
+use crate::sys;
 
 /// Quotes `s` for a POSIX shell.
 pub fn sh_quote(s: &str) -> String {
@@ -157,9 +146,14 @@ pub fn wildcard(pattern: &str, name: &str) -> bool {
 
 /// Expands `*` in the components of an absolute path, newest version first.
 pub fn glob(pattern: &Path) -> Vec<PathBuf> {
-    let mut found = vec![PathBuf::from("/")];
-    for comp in pattern.components().skip(1) {
-        let comp = comp.as_os_str().to_string_lossy();
+    let mut found = vec![PathBuf::new()];
+    for comp in pattern.components() {
+        // The root, and on Windows the drive.
+        let Component::Normal(comp) = comp else {
+            found.iter_mut().for_each(|p| p.push(comp));
+            continue;
+        };
+        let comp = comp.to_string_lossy();
         let mut next = Vec::new();
         for dir in &found {
             if comp.contains('*') {
@@ -192,11 +186,17 @@ pub fn expand_home(p: &str, home: Option<&str>) -> PathBuf {
 }
 
 pub fn home() -> Option<String> {
-    std::env::var("HOME").ok().filter(|h| !h.is_empty())
+    let var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
+    std::env::var(var).ok().filter(|h| !h.is_empty())
+}
+
+/// Whether a --profile value or browser candidate names a path rather than a name.
+pub fn is_path(s: &str) -> bool {
+    s == "~" || s.chars().any(std::path::is_separator)
 }
 
 pub fn is_executable(p: &Path) -> bool {
-    fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false)
+    fs::metadata(p).is_ok_and(|m| sys::is_executable(&m))
 }
 
 /// Ubuntu installs shell scripts that only say to install a snap, which never runs in a container.
@@ -210,23 +210,59 @@ fn is_snap_stub(p: &Path) -> bool {
     text.contains("/snap/bin/") && !is_executable(&Path::new("/snap/bin").join(name))
 }
 
-/// Finds an executable: a command name looked up in PATH, or a path that may contain `*` and `~`.
+/// On Windows, replaces a leading `%NAME%` with that environment variable, such as
+/// %ProgramFiles% or %LOCALAPPDATA%. None if it is not set.
+fn expand_var(p: &str) -> Option<String> {
+    let rest = match p.strip_prefix('%') {
+        Some(rest) if cfg!(windows) => rest,
+        _ => return Some(p.to_string()),
+    };
+    let (name, rest) = rest.split_once('%')?;
+    let value = std::env::var(name).ok().filter(|v| !v.is_empty())?;
+    Some(format!("{value}{rest}"))
+}
+
+/// The endings a command name may need to find its file: on Windows, those in PATHEXT.
+fn exe_suffixes() -> Vec<String> {
+    let mut suffixes = vec![String::new()];
+    if cfg!(windows) {
+        let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".into());
+        suffixes.extend(pathext.split(';').filter(|e| !e.is_empty()).map(str::to_ascii_lowercase));
+    }
+    suffixes
+}
+
+/// Finds an executable: a command name looked up in PATH, or a path that may contain `*` and `~`
+/// (and on Windows, start with `%NAME%`).
 pub fn find_executable(candidate: &str, home: Option<&str>) -> Option<PathBuf> {
-    if candidate.contains('/') {
-        let path = expand_home(candidate, home);
+    if candidate.chars().any(std::path::is_separator) {
+        let path = expand_home(&expand_var(candidate)?, home);
         let paths = if candidate.contains('*') { glob(&path) } else { vec![path] };
         return paths.into_iter().find(|p| is_executable(p) && !is_snap_stub(p));
     }
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(candidate)).find(|p| is_executable(p) && !is_snap_stub(p))
+    let suffixes = exe_suffixes();
+    std::env::split_paths(&path)
+        .flat_map(|d| suffixes.iter().map(move |s| d.join(format!("{candidate}{s}"))))
+        .find(|p| is_executable(p) && !is_snap_stub(p))
+}
+
+/// Whether `url` is an http or https URL with no spaces or control characters.
+pub fn is_web_url(url: &str) -> bool {
+    let lower = url.get(..8).unwrap_or(url).to_ascii_lowercase();
+    (lower.starts_with("http://") || lower.starts_with("https://"))
+        && url.len() <= 8192
+        && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
 /// A listening socket from /proc/net/tcp or tcp6.
+#[cfg(target_os = "linux")]
 pub struct Listener {
     pub addr: IpAddr,
     pub port: u16,
 }
 
+#[cfg(target_os = "linux")]
 fn parse_proc_addr(s: &str) -> Option<SocketAddr> {
     let (ip, port) = s.split_once(':')?;
     let port = u16::from_str_radix(port, 16).ok()?;
@@ -245,6 +281,7 @@ fn parse_proc_addr(s: &str) -> Option<SocketAddr> {
     Some(SocketAddr::new(ip, port))
 }
 
+#[cfg(target_os = "linux")]
 /// Rows of /proc/net/tcp and tcp6 as (local, remote, state, uid).
 fn proc_tcp() -> Vec<(SocketAddr, SocketAddr, u8, u32)> {
     let mut rows = Vec::new();
@@ -266,15 +303,18 @@ fn proc_tcp() -> Vec<(SocketAddr, SocketAddr, u8, u32)> {
     rows
 }
 
+#[cfg(target_os = "linux")]
 pub fn listening() -> Vec<Listener> {
     proc_tcp().into_iter().filter(|r| r.2 == 0x0A).map(|(l, ..)| Listener { addr: l.ip(), port: l.port() }).collect()
 }
 
+#[cfg(target_os = "linux")]
 /// The owner of the local TCP socket connected from `peer` to `local`, if /proc shows it.
 pub fn tcp_peer_uid(local: SocketAddr, peer: SocketAddr) -> Option<u32> {
     proc_tcp().into_iter().find(|r| r.0 == peer && r.1 == local).map(|r| r.3)
 }
 
+#[cfg(target_os = "linux")]
 pub fn is_loopback_or_any(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_unspecified(),
@@ -347,11 +387,13 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
-/// Percent-encodes a path for a file:// URL.
+/// Percent-encodes a path for a file:// URL. A Windows path such as C:\a\b becomes file:///C:/a/b.
 pub fn file_url(path: &str) -> String {
+    let drive = path.len() >= 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':';
+    let path = if drive { format!("/{}", path.replace('\\', "/")) } else { path.to_string() };
     let mut url = String::from("file://");
     for b in path.bytes() {
-        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+        if b.is_ascii_alphanumeric() || b"/-_.~:".contains(&b) {
             url.push(b as char);
         } else {
             url.push_str(&format!("%{b:02X}"));
@@ -360,49 +402,76 @@ pub fn file_url(path: &str) -> String {
     url
 }
 
-pub fn data_dir() -> PathBuf {
-    match std::env::var("XDG_DATA_HOME") {
-        Ok(d) if d.starts_with('/') => PathBuf::from(d),
-        _ => expand_home("~/.local/share", home().as_deref()),
+/// The directory that holds rembro's directory of data or caches: the XDG variable if it
+/// is set, and otherwise the system's usual place (on Windows, %LOCALAPPDATA%).
+fn base_dir(xdg: &str, linux: &str, macos: &str) -> PathBuf {
+    if let Ok(d) = std::env::var(xdg)
+        && Path::new(&d).is_absolute()
+    {
+        return PathBuf::from(d);
     }
+    if cfg!(windows)
+        && let Ok(d) = std::env::var("LOCALAPPDATA")
+        && !d.is_empty()
+    {
+        return PathBuf::from(d);
+    }
+    let rel = if cfg!(target_os = "macos") { macos } else { linux };
+    expand_home(&format!("~/{rel}"), home().as_deref())
 }
 
-pub fn mkdtemp(base: &Path, prefix: &str) -> std::io::Result<PathBuf> {
-    use std::os::unix::ffi::OsStringExt;
-    let template = base.join(format!("{prefix}XXXXXX"));
-    let mut bytes = template.into_os_string().into_vec();
-    bytes.push(0);
-    let p = unsafe { libc::mkdtemp(bytes.as_mut_ptr() as *mut libc::c_char) };
-    if p.is_null() {
-        return Err(std::io::Error::last_os_error());
+/// Where rembro keeps browser profiles, in `rembro/profiles`.
+pub fn data_dir() -> PathBuf {
+    base_dir("XDG_DATA_HOME", ".local/share", "Library/Application Support")
+}
+
+/// Where rembro keeps downloaded builds, in `rembro/VERSION`.
+pub fn cache_dir() -> PathBuf {
+    base_dir("XDG_CACHE_HOME", ".cache", "Library/Caches")
+}
+
+/// Creates a new directory, private to this user, named `prefix` and six random characters.
+pub fn mkdtemp(base: &Path, prefix: &str) -> io::Result<PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    for attempt in 0..100u32 {
+        let mut h = std::hash::RandomState::new().build_hasher();
+        h.write_u32(attempt);
+        h.write_u32(std::process::id());
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let mut n = h.finish();
+        let name: String = (0..6)
+            .map(|_| {
+                let c = CHARS[(n % CHARS.len() as u64) as usize] as char;
+                n /= CHARS.len() as u64;
+                c
+            })
+            .collect();
+        let path = base.join(format!("{prefix}{name}"));
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        match builder.create(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
     }
-    bytes.pop();
-    Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("no unused name for {prefix}XXXXXX")))
 }
 
 /// A private directory for sockets and other session files.
 pub fn runtime_base() -> PathBuf {
+    #[cfg(unix)]
     if let Ok(d) = std::env::var("XDG_RUNTIME_DIR")
         && d.starts_with('/')
         && fs::metadata(&d).is_ok_and(|m| m.is_dir())
-        && unsafe { libc::access(std::ffi::CString::new(d.clone()).unwrap().as_ptr(), libc::W_OK) } == 0
+        && sys::writable(Path::new(&d))
     {
         return PathBuf::from(d);
     }
     std::env::temp_dir()
-}
-
-pub fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    if unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } != 0 {
-        return String::new();
-    }
-    let n = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8_lossy(&buf[..n]).into_owned()
-}
-
-pub fn uid() -> u32 {
-    unsafe { libc::getuid() }
 }
 
 /// Makes a target or browser name safe to use as a directory name.
@@ -462,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn proc_addrs() {
         assert_eq!(parse_proc_addr("0100007F:1F90").unwrap(), "127.0.0.1:8080".parse().unwrap());
         assert_eq!(parse_proc_addr("00000000000000000000000001000000:0050").unwrap(), "[::1]:80".parse().unwrap());
@@ -475,7 +545,29 @@ mod tests {
     }
 
     #[test]
+    fn web_urls() {
+        assert!(is_web_url("https://example.org/a?b=c"));
+        assert!(is_web_url("HTTP://localhost:3000"));
+        assert!(!is_web_url("--renderer-cmd-prefix=sh -c id"));
+        assert!(!is_web_url("file:///etc/passwd"));
+        assert!(!is_web_url("javascript:alert(1)"));
+        assert!(!is_web_url("https://a b"));
+        assert!(!is_web_url("https://a\nb"));
+    }
+
+    #[test]
     fn urls() {
         assert_eq!(file_url("/tmp/a b/x.html"), "file:///tmp/a%20b/x.html");
+        assert_eq!(file_url(r"C:\Users\me\x y.pac"), "file:///C:/Users/me/x%20y.pac");
+    }
+
+    #[test]
+    fn temp_dirs() {
+        let a = mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
+        let b = mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
+        assert_ne!(a, b);
+        assert!(a.is_dir() && a.file_name().unwrap().to_string_lossy().len() == "rembro-test-".len() + 6);
+        fs::remove_dir(a).unwrap();
+        fs::remove_dir(b).unwrap();
     }
 }

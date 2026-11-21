@@ -34,12 +34,12 @@ For `--remote` and `rembro run`, rembro forwards this machine's PulseAudio socke
 
 ## Trusting the target's CA certificates
 
-A proxy that intercepts TLS, or an internal service with a private CA, presents certificates the browser here does not trust. `--trust-target-ca` makes the profile trust the CA certificates that an administrator added in the target: those in `/usr/local/share/ca-certificates`, `/etc/pki/ca-trust/source/anchors`, `/etc/ca-certificates/trust-source/anchors`, `/etc/pki/trust/anchors`, and `$NODE_EXTRA_CA_CERTS` unless that names the system bundle. It works with Chromium and Firefox, and only when the browser runs here.
+A proxy that intercepts TLS, or an internal service with a private CA, presents certificates the browser here does not trust. `--trust-target-ca` makes the profile trust the CA certificates that an administrator added in the target: those in `/usr/local/share/ca-certificates`, `/etc/pki/ca-trust/source/anchors`, `/etc/ca-certificates/trust-source/anchors`, `/etc/pki/trust/anchors`, and `$NODE_EXTRA_CA_CERTS` unless that names the system bundle. It works with Chromium and Firefox, and only when the browser runs here. On Windows it works with Chromium only, since Windows has neither p11-kit nor NSS's `certutil` (Windows's own `certutil` is a different program).
 
 Only that profile trusts them. rembro doesn't change `~/.pki/nssdb`, anything in `/etc`, or your other profiles.
 
 - For Chromium, rembro adds them to the profile's own certificate store (`Default/ServerCertificate`, where chrome://certificate-manager keeps certificates you install), and leaves any you installed yourself alone.
-- For Firefox, the profile's `pkcs11.txt` loads p11-kit's trust module with a bundle of the certificates, or, where p11-kit is missing, `certutil` adds them to the profile's `cert9.db`.
+- For Firefox, the profile's `pkcs11.txt` loads p11-kit's trust module with a bundle of the certificates, or, where p11-kit is missing, `certutil` adds them to the profile's `cert9.db`. On macOS rembro always uses `certutil`, which Homebrew's `nss` package provides.
 
 Without the flag, rembro removes certificates that an earlier launch added. On a profile that rembro did not create, it removes them again when the browser exits. If the profile is open in another window, its trusted CAs stay as they were.
 
@@ -47,7 +47,7 @@ Trusting a target's CA lets the target read that profile's HTTPS traffic, so use
 
 ## The SOCKS server
 
-When the browser runs here, rembro's SOCKS server listens on a random port on 127.0.0.1. It looks up each connection's owner in `/proc/net/tcp` and `/proc/net/tcp6`, and refuses connections from other users on this machine, which could otherwise use it to reach into the target.
+When the browser runs here, rembro's SOCKS server listens on a random port on 127.0.0.1. On Linux it looks up each connection's owner in `/proc/net/tcp` and `/proc/net/tcp6`, and refuses connections from other users on this machine, which could otherwise use it to reach into the target. macOS and Windows don't show rembro who owns a TCP connection, so there it accepts every connection to that port, and while it runs, other users of the machine who find the port can reach the target through it.
 
 ## Pages opened from the target
 

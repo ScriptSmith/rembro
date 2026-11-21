@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{SocketAddr, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::Child;
@@ -20,8 +21,8 @@ use crate::mux::{Handler, Mux, Sock};
 use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL};
 use crate::target::Target;
 use crate::util::PortSpec;
-use crate::x11;
 use crate::{attach, install, local, remote, run};
+use crate::{sys, util, x11};
 
 pub const DEBUG_ID: u32 = 1;
 pub const WAYLAND_ID: u32 = 2;
@@ -35,7 +36,7 @@ pub enum HostEvent {
     BrowserExited(Option<i32>, Option<i32>),
     /// The port watcher found a new HTTP server.
     NewServer(String),
-    Reconnected(Link),
+    Reconnected(Box<Link>),
 }
 
 /// Something on this machine that connections accepted in the target are joined to.
@@ -76,7 +77,10 @@ impl Handler for HostHandler {
                     Sock::Tcp(s)
                 })
                 .map_err(|e| format!("refused: {e}")),
+            #[cfg(unix)]
             Some(Endpoint::Unix(p)) => UnixStream::connect(p).map(Sock::Unix).map_err(|e| format!("refused: {e}")),
+            #[cfg(not(unix))]
+            Some(Endpoint::Unix(p)) => Err(format!("refused: cannot connect to {} here", p.display())),
             Some(Endpoint::X11(d, cookie)) => d.gate(cookie.clone()),
             Some(Endpoint::Pending(why)) => Err(format!("refused: {why}")),
             None => Err("other: not permitted".into()),
@@ -87,7 +91,7 @@ impl Handler for HostHandler {
         match serde_json::from_value(event) {
             // The agent checks URLs too, but a compromised target could send anything, and a
             // "URL" such as --renderer-cmd-prefix=... would reach the browser as an option.
-            Ok(Event::Open { url }) if !crate::agent::is_web_url(&url) => {
+            Ok(Event::Open { url }) if !util::is_web_url(&url) => {
                 eprintln!("rembro: ignored a request from the target to open something that is not an http(s) URL");
             }
             Ok(e) => {
@@ -205,7 +209,7 @@ impl Session {
                         if stop.load(Ordering::SeqCst) {
                             link.close();
                         } else {
-                            let _ = tx.send(HostEvent::Reconnected(link));
+                            let _ = tx.send(HostEvent::Reconnected(Box::new(link)));
                         }
                         return;
                     }
@@ -221,9 +225,9 @@ impl Session {
     }
 
     /// Swaps in a new connection from `reconnect`.
-    pub fn install(&self, link: Link) {
+    pub fn install(&self, link: Box<Link>) {
         *self.conn.0.write().unwrap() = link.mux.clone();
-        if let Some(old) = self.link.lock().unwrap().replace(link) {
+        if let Some(old) = self.link.lock().unwrap().replace(*link) {
             thread::spawn(move || old.close());
         }
     }
@@ -239,41 +243,21 @@ impl Session {
 /// Set once the session is up; before that a signal ends rembro at once.
 static READY: AtomicBool = AtomicBool::new(false);
 
-/// Blocks the signals rembro handles itself, so that a thread can wait for them. This must
-/// run before any other thread starts, so that every thread inherits the mask.
-fn block_signals() -> libc::sigset_t {
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for s in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
-            libc::sigaddset(&mut set, s);
-        }
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-        set
-    }
-}
-
-fn wait_signals(set: libc::sigset_t, tx: Sender<HostEvent>) {
-    thread::spawn(move || {
-        loop {
-            let mut sig = 0;
-            if unsafe { libc::sigwait(&set, &mut sig) } != 0 {
-                continue;
-            }
-            if !READY.load(Ordering::SeqCst) {
-                std::process::exit(128 + sig);
-            }
-            let _ = tx.send(HostEvent::Signal(sig));
-        }
-    });
-}
-
 fn connect(target_arg: &str, common: &Common) -> Result<Session, String> {
     let target = Target::parse(target_arg)?;
-    let set = block_signals();
+    if target == Target::Local && !cfg!(target_os = "linux") {
+        return Err(boot::LOCAL_NEEDS_LINUX.into());
+    }
     let (tx, rx) = mpsc::channel();
-    wait_signals(set, tx.clone());
-    let bin = Arc::new(AgentBin::load(common.agent.as_deref())?);
+    // This must come before any other thread starts.
+    let signals = Mutex::new(tx.clone());
+    sys::on_signals(move |sig| {
+        if !READY.load(Ordering::SeqCst) {
+            std::process::exit(128 + sig);
+        }
+        let _ = signals.lock().unwrap().send(HostEvent::Signal(sig));
+    });
+    let bin = Arc::new(AgentBin::load(common.agent.as_deref(), common.verbose)?);
     let handler = Arc::new(HostHandler { forwards: Mutex::new(HashMap::new()), events: tx.clone() });
     let link = Link::start(&target, &bin, &handler, common.verbose)?;
     let info = link.info.clone();
@@ -432,7 +416,7 @@ pub fn announce_debug(s: &Session, family: Family, port: u16) -> Option<String> 
 
 /// Asks the program to exit, and kills it if it has not within a few seconds.
 pub fn wait_exit(s: &Session, mut exited: impl FnMut(&HostEvent) -> bool, term: impl Fn(i32)) {
-    term(libc::SIGTERM);
+    term(sys::SIGTERM);
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -442,7 +426,7 @@ pub fn wait_exit(s: &Session, mut exited: impl FnMut(&HostEvent) -> bool, term: 
             Err(_) => break,
         }
     }
-    term(libc::SIGKILL);
+    term(sys::SIGKILL);
 }
 
 pub fn exit_code(code: Option<i32>, signal: Option<i32>) -> i32 {

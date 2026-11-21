@@ -4,9 +4,7 @@
 use std::any::Any;
 use std::fs;
 use std::io::{Read, Write};
-use std::os::unix::fs::FileTypeExt;
-use std::os::unix::net::UnixStream;
-use std::os::unix::process::CommandExt;
+use std::net::{Shutdown, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -20,10 +18,10 @@ use crate::mux::Sock;
 use crate::proto::{Addr, Call, Event, Open};
 use crate::target::Target;
 use crate::util::{self, PortSpec};
-use crate::{fetch, x11};
+use crate::{fetch, sys, x11};
 
 fn resolve(s: &Session, choice: &str, family: Option<Family>) -> Result<Resolved, String> {
-    let choices = browser::choices(choice, family)?;
+    let choices = browser::choices(choice, family, browser::Os::Linux)?;
     let groups: Vec<Vec<String>> = choices.iter().map(|c| c.candidates.clone()).collect();
     let found: Option<(usize, String)> = s.call(&Call::Find { groups })?;
     let (i, path) = found.ok_or_else(|| {
@@ -49,10 +47,11 @@ fn host_has(cmd: &str) -> bool {
 
 /// Copies `data` to `path` in the target.
 pub fn upload(s: &Session, data: &[u8], path: &str, mode: u32) -> Result<(), String> {
-    let (a, mut b) = UnixStream::pair().map_err(|e| e.to_string())?;
+    let (a, mut b) = Sock::pair().map_err(|e| e.to_string())?;
     let store = Open::Store { path: path.into(), size: data.len() as u64, mode };
-    s.conn.mux().open(&store, Sock::Unix(a), |_, _| ())?;
-    b.write_all(data).and_then(|_| b.shutdown(std::net::Shutdown::Write)).map_err(|e| format!("upload: {e}"))?;
+    s.conn.mux().open(&store, a, |_, _| ())?;
+    b.write_all(data).map_err(|e| format!("upload: {e}"))?;
+    b.shutdown(Shutdown::Write);
     let mut reply = String::new();
     let _ = b.read_to_string(&mut reply);
     if reply.trim() == "ok" { Ok(()) } else { Err(format!("upload to {path} failed: {}", reply.trim())) }
@@ -79,14 +78,15 @@ fn target_waypipe(s: &Session) -> Result<String, String> {
 fn waypipe_client(dir: &Path, quiet: bool) -> Result<(Child, PathBuf), String> {
     let sock = dir.join("waypipe.sock");
     let mut cmd = Command::new("waypipe");
-    cmd.args(["--no-gpu", "-s"]).arg(&sock).arg("client").stdin(Stdio::null()).process_group(0);
+    cmd.args(["--no-gpu", "-s"]).arg(&sock).arg("client").stdin(Stdio::null());
+    sys::own_group(&mut cmd);
     if quiet {
         cmd.stderr(Stdio::null());
     }
-    util::unblock_signals(&mut cmd);
+    sys::unblock_signals(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("cannot run waypipe: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !fs::symlink_metadata(&sock).is_ok_and(|m| m.file_type().is_socket()) {
+    while !sys::is_socket(&sock) {
         if Instant::now() > deadline || matches!(child.try_wait(), Ok(Some(_))) {
             let _ = child.kill();
             return Err("the waypipe client did not start".into());
@@ -96,12 +96,23 @@ fn waypipe_client(dir: &Path, quiet: bool) -> Result<(Child, PathBuf), String> {
     Ok((child, sock))
 }
 
-fn pulse_socket() -> Option<PathBuf> {
-    let path = match std::env::var("PULSE_SERVER") {
-        Ok(v) => PathBuf::from(v.strip_prefix("unix:")?),
-        Err(_) => PathBuf::from(std::env::var("XDG_RUNTIME_DIR").ok()?).join("pulse/native"),
+/// This machine's PulseAudio server: the first in PULSE_SERVER if it is a `unix:` socket or a
+/// `tcp:` address, or the usual socket in XDG_RUNTIME_DIR.
+fn pulse_server() -> Option<Endpoint> {
+    let server = match std::env::var("PULSE_SERVER") {
+        Ok(v) => v.split_whitespace().next()?.to_string(),
+        Err(_) => format!("unix:{}", Path::new(&std::env::var("XDG_RUNTIME_DIR").ok()?).join("pulse/native").display()),
     };
-    fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_socket()).then_some(path)
+    if let Some(path) = server.strip_prefix("unix:") {
+        return sys::is_socket(Path::new(path)).then(|| Endpoint::Unix(path.into()));
+    }
+    let addr = server.strip_prefix("tcp:").or_else(|| server.strip_prefix("tcp6:"))?;
+    let (host, port) = match addr.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, p.parse().ok()?),
+        _ => (addr, 4713),
+    };
+    let addr = (host.trim_matches(['[', ']']), port).to_socket_addrs().ok()?.next()?;
+    Some(Endpoint::Tcp(addr))
 }
 
 fn pulse_cookie() -> Option<Vec<u8>> {
@@ -148,8 +159,29 @@ pub struct GuiSetup {
     _guards: Vec<Box<dyn Any>>,
 }
 
-/// Picks Wayland or X11 and the target's waypipe. None means no display.
-fn choose_display(opts: &GuiOpts, s: &Session, required: bool) -> Result<Option<(Gui, Option<String>)>, String> {
+/// How windows from the target reach a display.
+enum Shown {
+    /// Through waypipe, with the target's waypipe.
+    Wayland(String),
+    /// Forwarded to this machine's X server.
+    X11,
+    /// On the target's own display, such as WSLg's in WSL.
+    Target(Gui),
+}
+
+/// Why there is no display here, and what to do about it.
+fn no_display() -> (&'static str, &'static str) {
+    if cfg!(target_os = "macos") {
+        ("this Mac has no X11 display", "; install XQuartz from https://www.xquartz.org, then log out and back in")
+    } else if cfg!(windows) {
+        ("this machine has no X11 display", "; start an X server such as VcXsrv or X410, and set DISPLAY=127.0.0.1:0")
+    } else {
+        ("this session has neither a Wayland nor an X11 display", "")
+    }
+}
+
+/// Picks how windows are shown. None means no display.
+fn choose_display(opts: &GuiOpts, s: &Session, required: bool) -> Result<Option<Shown>, String> {
     if opts.display == DisplayArg::None {
         return Ok(None);
     }
@@ -157,7 +189,7 @@ fn choose_display(opts: &GuiOpts, s: &Session, required: bool) -> Result<Option<
     let x11_here = x11::Display::from_env().is_some();
     if opts.display != DisplayArg::X11 && wayland_here {
         match target_waypipe(s) {
-            Ok(path) => return Ok(Some((Gui::Wayland, Some(path)))),
+            Ok(path) => return Ok(Some(Shown::Wayland(path))),
             Err(e) if opts.display == DisplayArg::Wayland => {
                 return Err(format!("{} has no waypipe, and rembro could not provide one: {e}", s.label));
             }
@@ -171,12 +203,22 @@ fn choose_display(opts: &GuiOpts, s: &Session, required: bool) -> Result<Option<
         });
     }
     if x11_here {
-        return Ok(Some((Gui::X11, None)));
+        return Ok(Some(Shown::X11));
     }
+    if opts.display == DisplayArg::Auto
+        && let Some(gui) =
+            s.info.wayland_display.as_ref().map(|_| Gui::Wayland).or(s.info.display.as_ref().map(|_| Gui::X11))
+    {
+        if s.verbose {
+            eprintln!("rembro: this machine has no display, so windows go to {}'s own", s.label);
+        }
+        return Ok(Some(Shown::Target(gui)));
+    }
+    let (why, hint) = no_display();
     if required {
-        return Err("this session has neither a Wayland nor an X11 display to show windows on".into());
+        return Err(format!("{why} to show windows on{hint}"));
     }
-    eprintln!("rembro: this session has no display, so the program runs without one");
+    eprintln!("rembro: {why}, so the program runs without one");
     Ok(None)
 }
 
@@ -188,7 +230,8 @@ pub fn setup_gui(s: &Session, opts: &GuiOpts, dir: &str, required: bool) -> Resu
     }
     match choose_display(opts, s, required)? {
         None => {}
-        Some((Gui::Wayland, waypipe)) => {
+        Some(Shown::Target(gui)) => g.gui = Some(gui),
+        Some(Shown::Wayland(waypipe)) => {
             let host_dir = util::mkdtemp(&util::runtime_base(), "rembro-").map_err(|e| format!("mkdtemp: {e}"))?;
             let (child, sock) = waypipe_client(&host_dir, s.quiet)?;
             g._guards.push(Box::new(KillOnDrop(child)));
@@ -197,7 +240,7 @@ pub fn setup_gui(s: &Session, opts: &GuiOpts, dir: &str, required: bool) -> Resu
             let target_sock = format!("{dir}/waypipe.sock");
             s.call::<u16>(&Call::Listen { id: WAYLAND_ID, addr: Addr::Unix { path: target_sock.clone() } })?;
             g.wrapper = vec![
-                waypipe.unwrap_or_else(|| "waypipe".into()),
+                waypipe,
                 "--no-gpu".into(),
                 "--title-prefix".into(),
                 format!("[{}] ", s.label),
@@ -208,7 +251,7 @@ pub fn setup_gui(s: &Session, opts: &GuiOpts, dir: &str, required: bool) -> Resu
             ];
             g.gui = Some(Gui::Wayland);
         }
-        Some((_, _)) => {
+        Some(Shown::X11) => {
             let display = x11::Display::from_env().ok_or("DISPLAY is not set")?;
             let cookie = display.cookie();
             let mut give = cookie.clone();
@@ -247,9 +290,9 @@ pub fn setup_gui(s: &Session, opts: &GuiOpts, dir: &str, required: bool) -> Resu
         }
     }
     if !opts.no_audio
-        && let Some(sock) = pulse_socket()
+        && let Some(server) = pulse_server()
     {
-        s.forward(PULSE_ID, Endpoint::Unix(sock));
+        s.forward(PULSE_ID, server);
         let target_sock = format!("{dir}/pulse.sock");
         s.call::<u16>(&Call::Listen { id: PULSE_ID, addr: Addr::Unix { path: target_sock.clone() } })?;
         g.env.push(("PULSE_SERVER".into(), format!("unix:{target_sock}")));
@@ -455,7 +498,7 @@ fn old_chromium(s: &Session, browser: &Resolved) -> Option<u32> {
     (major < 98).then_some(major)
 }
 
-/// The major version in output such as "Chromium 92.0.4515.98 Built on Raspbian".
+/// The major version in output such as "Chromium 90.0.4430.212 built on Debian 10.9".
 fn chromium_major(version: &str) -> Option<u32> {
     version
         .split_whitespace()
@@ -480,7 +523,7 @@ mod tests {
 
     #[test]
     fn chromium_versions() {
-        assert_eq!(chromium_major("Chromium 92.0.4515.98 Built on Raspbian , running on Raspbian 10"), Some(92));
+        assert_eq!(chromium_major("Chromium 90.0.4430.212 built on Debian 10.9, running on Debian 10.13"), Some(90));
         assert_eq!(chromium_major("Google Chrome 131.0.6778.85 "), Some(131));
         assert_eq!(chromium_major("Brave Browser 131.1.73.89"), Some(131));
         assert_eq!(chromium_major("nonsense 1.2"), None);

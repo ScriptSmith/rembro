@@ -4,9 +4,9 @@ This page describes how rembro starts its agent in a target and talks to it, how
 
 ## The agent
 
-rembro runs a small POSIX `sh` script in the target through the target's exec command (`ssh`, `docker exec -i` and so on; [Targets](usage.md#targets) lists them). For the `local` target it starts its own binary directly.
+rembro runs a small POSIX `sh` script in the target through the target's exec command (`ssh`, `docker exec -i` and so on; [Targets](usage.md#targets) lists them). For the `local` target, which exists only on Linux, it starts its own binary directly.
 
-The script looks for a cached agent in `~/.cache/rembro` (or `$XDG_CACHE_HOME/rembro`), `${TMPDIR:-/tmp}/rembro-UID` and `/dev/shm/rembro-UID`, in that order. The cached file is named after a hash of the binary, so a different rembro build never runs a stale agent. If the target has no copy that runs, rembro sends its own binary (1.2 to 1.5 MB, depending on the architecture) over the exec command's stdin. The script saves it in the first of those directories that it can write, checks that it runs, and removes older agent builds from that directory. Every later session starts the cached copy. rembro and the agent then check that they speak the same protocol version, and if they don't, rembro asks for a matching build with `--agent`.
+The script looks for a cached agent in `~/.cache/rembro` (or `$XDG_CACHE_HOME/rembro`), `${TMPDIR:-/tmp}/rembro-UID` and `/dev/shm/rembro-UID`, in that order. The cached file is named after a hash of the binary, so a different rembro build never runs a stale agent. If the target has no copy that runs, rembro sends its own binary (1.2 to 1.5 MB, depending on the architecture) over the exec command's stdin. On macOS and Windows, where rembro's own binary is not a Linux program, it sends its Linux build for this machine's architecture instead. The script saves it in the first of those directories that it can write, checks that it runs, and removes older agent builds from that directory. Every later session starts the cached copy. rembro and the agent then check that they speak the same protocol version, and if they don't, rembro asks for a matching build with `--agent`.
 
 rembro carries every connection, command and file over that one stdin/stdout pair. Calls, events and any number of byte streams share it, and each stream has its own 1 MiB send window in each direction, so one slow reader can't stall the others. Both sides send a ping every 15 seconds. Nothing listens on the target's network except the `--debug` endpoint and the X11 display described below.
 
@@ -14,9 +14,9 @@ rembro runs `ssh` with `-T -e none -o ServerAliveInterval=15 -o ServerAliveCount
 
 ## Other architectures
 
-Targets can have a different architecture from this machine. The bootstrap script reports `uname -m`, and for x86_64, aarch64 and armv7 (a Raspberry Pi 2 or later on a 32-bit OS) rembro sends the matching build. Other architectures need `--agent PATH` with a static build of rembro for them. rembro never swaps a binary given with `--agent` for another build, and stops with an error if it doesn't match the target's architecture.
+Targets can have a different architecture from this machine. The bootstrap script reports `uname -m`, and for x86_64, aarch64 and armv7 rembro sends the matching build. On macOS and Windows, rembro first offers the Linux build for this machine's architecture, which Docker Desktop, WSL and most local VMs share, and switches in the same way when the target reports another. Other architectures need `--agent PATH` with a static build of rembro for them. rembro never swaps a binary given with `--agent` for another build, and stops with an error if it doesn't match the target's architecture.
 
-rembro looks for the builds it copies into targets (`rembro-ARCH` for a target of another architecture, and `waypipe-ARCH`) next to its own executable first, which is where the release archives put them. Then it looks in `~/.cache/rembro/VERSION` (under `$XDG_CACHE_HOME` if you set it). Failing both, it downloads the file with `curl` or `wget` from the GitHub release of the same version, checks it against the release's `SHA256SUMS`, and keeps it in that cache directory. `REMBRO_RELEASES` changes where it downloads from (default `https://github.com/ScriptSmith/rembro/releases/download`).
+rembro looks for the builds it copies into targets (`rembro-ARCH` for a target of another architecture, or for any target on macOS and Windows, and `waypipe-ARCH`) next to its own executable first, which is where the release archives put them. Then it looks in `~/.cache/rembro/VERSION` (under `$XDG_CACHE_HOME` if you set it), which is `~/Library/Caches/rembro/VERSION` on macOS and `%LOCALAPPDATA%\rembro\VERSION` on Windows. Failing both, it downloads the file with `curl` or `wget` (Windows 10 and later include `curl`) from the GitHub release of the same version, checks it against the release's `SHA256SUMS`, and keeps it in that cache directory. `REMBRO_RELEASES` changes where it downloads from (default `https://github.com/ScriptSmith/rembro/releases/download`).
 
 A rembro linked against glibc copies that same binary into the target, so it fails in Alpine containers and on distributions with an older glibc. When an upload fails that way, rembro suggests a static build (`x86_64-unknown-linux-musl`), which runs on any Linux.
 
@@ -43,13 +43,13 @@ Docker sbx sandboxes are an example of why the direct default exists. Their envi
 
 ## Display forwarding
 
-`--display auto` uses Wayland through waypipe when this session is Wayland and waypipe is installed here, and X11 otherwise. If the target has no waypipe, rembro copies in a static build (about 2 MB) and keeps it next to the agent. When it can't provide one, for example on an architecture it has no build for, it says so and uses X11. `--display wayland` and `--display x11` force one or the other.
+`--display auto` uses Wayland through waypipe when this session is Wayland and waypipe is installed here, and X11 otherwise. When this machine has neither, as on macOS without XQuartz or on Windows without an X server, and the target has a display of its own, such as WSLg's in a WSL distribution, programs use the target's display and rembro forwards none. If the target has no waypipe, rembro copies in a static build (about 2 MB) and keeps it next to the agent. When it can't provide one, for example on an architecture it has no build for, it says so and uses X11. `--display wayland` and `--display x11` force one or the other.
 
 waypipe runs with `--no-gpu`, since containers rarely have a GPU, and window titles get a `[TARGET]` prefix.
 
-For X11, rembro listens on `127.0.0.1:60NN` in the target, sets `DISPLAY=127.0.0.1:NN` and `XAUTHORITY` for the program, and relays each connection to this machine's X server. By default the program gets an untrusted cookie, as with `ssh -X`. [Security](security.md#x11) describes what that allows and what `--x11-trusted` changes.
+For X11, rembro listens on `127.0.0.1:60NN` in the target, sets `DISPLAY=127.0.0.1:NN` and `XAUTHORITY` for the program, and relays each connection to this machine's X server. It reaches the X server through the socket that `DISPLAY` names, which on macOS is a path to XQuartz's socket, or over TCP, which is how Windows X servers listen (`DISPLAY=127.0.0.1:0` means port 6000). By default the program gets an untrusted cookie, as with `ssh -X`. [Security](security.md#x11) describes what that allows and what `--x11-trusted` changes.
 
-Distributions built Chromium without Wayland support until about version 98, and those builds crash under waypipe. With `--display auto`, rembro asks a Chromium in the target for its version and uses X11 for older ones. That covers Raspberry Pi OS 10, which ships Chromium 92. If a browser exits with an error within 20 seconds under Wayland, rembro suggests `--display x11`.
+Distributions built Chromium without Wayland support until about version 98, and those builds crash under waypipe. With `--display auto`, rembro asks a Chromium in the target for its version and uses X11 for older ones. If a browser exits with an error within 20 seconds under Wayland, rembro suggests `--display x11`.
 
 For a remote Chromium, rembro adds `--disable-gpu` and `--password-store=basic`, `--no-sandbox` when the target runs it as root, `--no-xshm` over X11, and `--disable-dev-shm-usage` when the target's `/dev/shm` is smaller than 1 GiB (Docker's default is 64 MiB).
 
@@ -57,11 +57,11 @@ When the target has no usable `XDG_RUNTIME_DIR`, rembro sets it to the session's
 
 ## Sound
 
-Sound from the target plays here through this machine's PulseAudio server, or PipeWire's PulseAudio server, when one is running. rembro forwards its socket (`$PULSE_SERVER`, or `$XDG_RUNTIME_DIR/pulse/native`) to a socket in the session's directory in the target, and sets `PULSE_SERVER` and `PULSE_COOKIE` for the program. `--no-audio` turns this off.
+Sound from the target plays here through this machine's PulseAudio server, or PipeWire's PulseAudio server, when one is running. rembro forwards it (the first server in `$PULSE_SERVER`, which may be a `unix:` socket or a `tcp:` address, or else `$XDG_RUNTIME_DIR/pulse/native`) to a socket in the session's directory in the target, and sets `PULSE_SERVER` and `PULSE_COOKIE` for the program. `--no-audio` turns this off.
 
 ## Lifecycle
 
-rembro exits when the browser or program does, with its exit status. On Ctrl-C, SIGTERM or SIGHUP it asks the program to close, kills it after five seconds, and exits with 128 plus the signal number.
+rembro exits when the browser or program does, with its exit status. On Ctrl-C, SIGTERM or SIGHUP it asks the program to close, kills it after five seconds, and exits with 128 plus the signal number. On Windows, Ctrl-C, Ctrl-Break and closing the console window do the same, and rembro closes a browser on this machine with `taskkill`, adding `/F` after five seconds.
 
 When the browser runs here and the connection to the target drops, the browser stays open and rembro reconnects, retrying after one second and then with a delay that doubles up to 15 seconds. Pages that load in the meantime fail. If the `--debug` endpoint has to move to another port after a reconnect, rembro says so. With `--remote` and `rembro run`, the program lives in the target and ends with the connection.
 
@@ -73,6 +73,8 @@ The agent in the target stops when its stdin closes, or after 60 seconds without
 cargo test
 cargo build --release --target x86_64-unknown-linux-musl
 ```
+
+On macOS and Windows, `cargo build --release` builds rembro for that system. It copies Linux builds into targets: those next to it, those in its cache, or those from the release of the same version. To try a change to the agent from there, build rembro for Linux, for example with `cargo zigbuild --release --target aarch64-unknown-linux-musl`, and pass it with `--agent`.
 
 `--agent PATH` copies a different build into the target, for example a musl build while you work with a glibc one. `REMBRO_RELEASES` changes where rembro downloads other architectures' builds and waypipe from ([Other architectures](#other-architectures)).
 

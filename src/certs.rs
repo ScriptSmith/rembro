@@ -14,7 +14,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -134,7 +133,11 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 fn write_atomic(path: &Path, data: &[u8]) -> Result<(), String> {
     let tmp = sibling(path, ".rembro-new");
     let write = || -> io::Result<()> {
-        let mut f = fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        let mut opts = fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
+        let mut f = opts.open(&tmp)?;
         f.write_all(data)?;
         fs::rename(&tmp, path)
     };
@@ -156,8 +159,12 @@ pub fn has_rembro_trust(profile: &Path) -> bool {
     [CHROMIUM_STATE, FIREFOX_BUNDLE, CERTUTIL_MARKER].iter().any(|f| profile.join(f).exists())
 }
 
-/// Finds p11-kit's trust module, which NSS can load to read anchors from PEM files.
+/// Finds p11-kit's trust module, which NSS can load to read anchors from PEM files. Only
+/// Linux distributions build Firefox's NSS to go with it.
 pub fn find_p11kit_trust() -> Option<PathBuf> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
     [
         "/usr/lib64/pkcs11/p11-kit-trust.so".to_string(),
         format!("/usr/lib/{}-linux-gnu/pkcs11/p11-kit-trust.so", std::env::consts::ARCH),
@@ -173,6 +180,10 @@ pub fn find_p11kit_trust() -> Option<PathBuf> {
 /// on earlier launches. An empty `certs` removes what rembro added. An error leaves the profile usable, so the
 /// caller can print it as a warning and start the browser.
 pub fn apply_firefox(profile: &Path, certs: &[Vec<u8>]) -> Result<(), String> {
+    // Windows has a certutil of its own, which is not NSS's, and no p11-kit.
+    if cfg!(windows) && !certs.is_empty() {
+        return Err("on Windows, rembro can add CA certificates only to Chromium profiles".into());
+    }
     apply_firefox_with(profile, certs, find_p11kit_trust().as_deref(), "certutil")
 }
 
@@ -268,8 +279,8 @@ fn run(cmd: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<String, String>
         .spawn()
         .map_err(|e| match e.kind() {
             io::ErrorKind::NotFound => format!(
-                "{cmd} is not installed (it comes with NSS's tools: nss on Arch, libnss3-tools on Debian and Ubuntu, \
-                 nss-tools on Fedora)"
+                "{cmd} is not installed (it comes with NSS's tools: nss on Arch and Homebrew, libnss3-tools on \
+                 Debian and Ubuntu, nss-tools on Fedora)"
             ),
             _ => format!("cannot run {cmd}: {e}"),
         })?;
@@ -364,11 +375,11 @@ pub fn apply_chromium(user_data_dir: &Path, certs: &[Vec<u8>]) -> Result<(), Str
     let unchanged = db_path.exists() && rows.len() == existing.len() && rows.iter().all(|r| existing.contains(r));
     if !unchanged {
         if let Some(dir) = db_path.parent() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+            builder.create(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
         }
         write_atomic(&db_path, &server_cert_db(&rows)?)?;
     }
@@ -1026,6 +1037,10 @@ cipherOrder=100 slotParams=(1={slotFlags=[ECC,RSA] askpw=any timeout=30})\n\n";
     }
 
     fn have(cmd: &str) -> bool {
+        // Windows's own certutil is not NSS's.
+        if cfg!(windows) && cmd == "certutil" {
+            return false;
+        }
         Command::new(cmd).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
     }
 
@@ -1100,6 +1115,8 @@ cipherOrder=100 slotParams=(1={slotFlags=[ECC,RSA] askpw=any timeout=30})\n\n";
     }
 
     #[test]
+    // NSS's module parameters cannot quote a Windows path's backslashes.
+    #[cfg(unix)]
     fn firefox_p11kit() {
         let d = Dir::new("ff-p11kit");
         let (one, two) = certs();

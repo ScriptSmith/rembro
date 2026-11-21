@@ -6,7 +6,10 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 
 use crate::target::Target;
-use crate::util;
+use crate::{sys, util};
+
+pub const LOCAL_NEEDS_LINUX: &str =
+    "the local target works only on Linux, since rembro's agent runs on Linux; use a container or VM";
 
 pub struct AgentBin {
     bytes: Vec<u8>,
@@ -18,24 +21,31 @@ pub struct AgentBin {
 }
 
 impl AgentBin {
-    /// The binary to run as the agent: `path`, or this executable.
-    pub fn load(path: Option<&Path>) -> Result<AgentBin, String> {
-        let explicit = path.is_some();
-        let path = match path {
-            Some(p) => p.to_path_buf(),
-            None => std::env::current_exe().map_err(|e| format!("cannot find this executable: {e}"))?,
-        };
-        let bytes = fs::read(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    /// The binary to run as the agent: `path`, or this executable. On macOS and Windows it
+    /// is the Linux build for this machine's architecture, which its containers and VMs
+    /// usually share.
+    pub fn load(path: Option<&Path>, verbose: bool) -> Result<AgentBin, String> {
+        match path {
+            Some(p) => AgentBin::read(p, true),
+            None if cfg!(target_os = "linux") => {
+                let exe = std::env::current_exe().map_err(|e| format!("cannot find this executable: {e}"))?;
+                AgentBin::read(&exe, false)
+            }
+            None => AgentBin::for_arch(std::env::consts::ARCH, verbose),
+        }
+    }
+
+    fn read(path: &Path, explicit: bool) -> Result<AgentBin, String> {
+        let bytes = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
         let hash = format!("{:016x}", util::fnv64(&bytes));
         let (machine, dynamic) = elf_info(&bytes);
         Ok(AgentBin { bytes, hash, machine, dynamic, explicit })
     }
 
-    /// A build for another architecture: beside this executable, cached, or downloaded.
+    /// The Linux build for an architecture: beside this executable, cached, or downloaded.
     fn for_arch(arch: &str, verbose: bool) -> Result<AgentBin, String> {
         let path = crate::fetch::tool("rembro", arch, verbose)?;
-        let mut bin = AgentBin::load(Some(&path))?;
-        bin.explicit = false;
+        let bin = AgentBin::read(&path, false)?;
         if bin.machine != machine_for(arch) {
             return Err(format!("{} is not built for {arch}", path.display()));
         }
@@ -129,13 +139,24 @@ pub struct Started {
     pub stdout: BufReader<ChildStdout>,
 }
 
+/// The agent for the `local` target: this executable, which on Linux is its own agent.
+#[cfg(target_os = "linux")]
+fn local_agent() -> Result<(std::process::Command, String), String> {
+    let exe = std::env::current_exe().map_err(|e| format!("cannot find this executable: {e}"))?;
+    let hash = crate::agent::self_hash().map_err(|e| format!("cannot read this executable: {e}"))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("agent");
+    Ok((cmd, hash))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_agent() -> Result<(std::process::Command, String), String> {
+    Err(LOCAL_NEEDS_LINUX.into())
+}
+
 pub fn start(target: &Target, bin: &AgentBin, verbose: bool) -> Result<Started, String> {
     let (mut cmd, expect) = if *target == Target::Local {
-        let exe = std::env::current_exe().map_err(|e| format!("cannot find this executable: {e}"))?;
-        let hash = crate::agent::self_hash().map_err(|e| format!("cannot read this executable: {e}"))?;
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("agent");
-        (cmd, hash)
+        local_agent()?
     } else {
         let argv = ["sh".to_string(), "-c".to_string(), script(&bin.hash, bin.bytes.len())];
         (target.command(&argv), bin.hash.clone())
@@ -143,7 +164,7 @@ pub fn start(target: &Target, bin: &AgentBin, verbose: bool) -> Result<Started, 
     if verbose {
         eprintln!("rembro: running {:?}", cmd.get_program());
     }
-    util::unblock_signals(&mut cmd);
+    sys::unblock_signals(&mut cmd);
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -228,6 +249,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn this_binary() {
         let bytes = fs::read(std::env::current_exe().unwrap()).unwrap();
         let (machine, _) = elf_info(&bytes);

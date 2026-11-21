@@ -4,9 +4,11 @@
 
 rembro opens a web browser that uses the networking of an SSH server, container, sandbox, or VM. `localhost:3000` is the dev server in the container, and names like `db` or `api.shop.svc` resolve the way they do in there, so you never forward a port.
 
-Run `rembro ssh:devbox` and a tab opens for every web server listening on devbox. Servers that start later get a tab too.
+Run `rembro ssh:devbox` and a tab opens for every web server listening on devbox.
 
 Run with the `--debug` flag, and let your agent drive the browser via playwright.
+
+rembro runs on Linux, macOS and Windows. Its targets run Linux.
 
 ```sh
 rembro ssh:devbox                                # a tab for each dev server on devbox
@@ -15,7 +17,7 @@ rembro k8s:shop/api-7d9f http://orders.shop.svc  # a cluster service, no kubectl
 rembro ssh:bastion http://10.0.4.12:3000         # an address only the bastion can reach
 rembro --remote ssh:devbox                       # run the browser on devbox, show its window here
 rembro --debug sbx:myapp                         # let an AI agent in the sandbox drive the browser
-rembro run ssh:rpi gnome-calculator              # any GUI program, window shown here
+rembro run ssh:devbox gimp                       # any GUI program, window shown here
 rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
 ```
 
@@ -25,16 +27,16 @@ rembro install docker:shop-web-1 firefox         # put a browser in the containe
 - Open a Kubernetes service, an admin UI or a metrics dashboard without `kubectl port-forward`, using cluster DNS names.
 - Reach internal sites and private IPs that only a bastion host or VPN gateway can see, without setting up an `ssh -D` SOCKS proxy by hand.
 - Let an AI coding agent in a sandbox drive a real browser with Playwright or Puppeteer over CDP or WebDriver BiDi, while you watch.
-- Run graphical Linux programs on a server or Raspberry Pi and see their windows on your Wayland or X11 desktop, with sound.
+- Run graphical Linux programs on a server, in a container or in a VM, and see their windows on your desktop, with sound.
 
 ## Where the browser runs
 
 - On this machine, by default. rembro points the browser at a SOCKS5 proxy on this machine's loopback, and the target makes every connection for it, DNS lookups included. You keep your own browser, fonts, GPU and window manager, with a separate profile for each target.
 - In the target, with `--remote`. Its window comes to this desktop through [waypipe](https://gitlab.freedesktop.org/mstoeckl/waypipe) on Wayland or through a forwarded X11 connection, and its sound plays here.
 
-`rembro run` starts any other graphical program in the target and shows its windows here in the same way.
+`rembro run` starts any other graphical program in the target and shows its windows here in the same way. On macOS that needs [XQuartz](https://www.xquartz.org), and on Windows an X server such as VcXsrv, except for WSL targets, which show their windows through WSLg ([details](docs/usage.md#displays-on-macos-and-windows)).
 
-rembro runs on Linux, and targets must be Linux too. It carries TCP only, so when the browser runs here, QUIC and WebRTC media don't go through the target.
+rembro carries TCP only, so when the browser runs here, QUIC and WebRTC media don't go through the target.
 
 ## Install
 
@@ -42,9 +44,9 @@ rembro runs on Linux, and targets must be Linux too. It carries TCP only, so whe
 curl -fsSL https://raw.githubusercontent.com/ScriptSmith/rembro/main/install.sh | sh
 ```
 
-The script downloads the latest release for this machine's architecture, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/lib/rembro` and links `~/.local/bin/rembro` to it. `curl ... | REMBRO_VERSION=0.1.0 sh` installs a particular release, and `REMBRO_PREFIX` puts it somewhere other than `~/.local`.
+The script works on Linux and macOS. It downloads the latest release for this machine, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/lib/rembro` and links `~/.local/bin/rembro` to it. `curl ... | REMBRO_VERSION=0.1.0 sh` installs a particular release, and `REMBRO_PREFIX` puts it somewhere other than `~/.local`.
 
-To install by hand, take an archive from the [releases page](https://github.com/ScriptSmith/rembro/releases). There are static builds for x86_64, aarch64 and armv7 Linux. Each archive holds `rembro`, the rembro builds for the other two architectures, and static waypipe builds for all three. rembro copies those into targets that need them, so keep them next to `rembro`:
+To install by hand, take an archive from the [releases page](https://github.com/ScriptSmith/rembro/releases). There are static builds for x86_64, aarch64 and armv7 Linux, builds for x86_64 and aarch64 macOS, and an x86_64 build for Windows. Each archive holds `rembro` and the Linux builds of rembro that it copies into targets: the other two architectures in a Linux archive, and all three in a macOS or Windows one. The Linux archives also hold static waypipe builds for all three architectures. Keep these files next to `rembro`:
 
 ```sh
 mkdir -p ~/.local/lib/rembro ~/.local/bin
@@ -53,27 +55,47 @@ curl -L https://github.com/ScriptSmith/rembro/releases/latest/download/rembro-x8
 ln -sf ~/.local/lib/rembro/rembro ~/.local/bin/rembro
 ```
 
+On Windows, unzip `rembro-x86_64-windows.zip` and add the folder it makes to your `PATH`. Windows 11 on Arm runs the x86_64 build under emulation. If you download a macOS archive with a web browser, macOS won't run the unsigned binary until you clear the quarantine flag with `xattr -dr com.apple.quarantine` on the unpacked folder.
+
 With Cargo:
 
 ```sh
-cargo install rembro --target x86_64-unknown-linux-musl
+cargo install rembro --target x86_64-unknown-linux-musl  # on Linux
+cargo install rembro                                     # on macOS and Windows
 ```
 
-A Cargo install has no builds for other architectures or waypipe next to it. rembro downloads the ones it needs from the GitHub release of the same version, checks them against the release's `SHA256SUMS`, and keeps them in `~/.cache/rembro/VERSION`. A plain `cargo install rembro` also works, but it links against this machine's glibc. Since rembro copies its own binary into the target, that build fails in Alpine containers and on distributions with an older glibc. The musl build runs on any Linux.
+A Cargo install has no builds for other architectures or waypipe next to it. rembro downloads the ones it needs from the GitHub release of the same version, checks them against the release's `SHA256SUMS`, and keeps them in its cache: `~/.cache/rembro/VERSION` on Linux, `~/Library/Caches/rembro/VERSION` on macOS and `%LOCALAPPDATA%\rembro\VERSION` on Windows. On macOS and Windows that includes the Linux build it copies into every target. On Linux, a plain `cargo install rembro` also works, but it links against this machine's glibc. Since rembro copies its own binary into the target, that build fails in Alpine containers and on distributions with an older glibc. The musl build runs on any Linux.
 
 ## Targets
 
 | Target | What it is |
 |---|---|
-| `local` | this machine |
-| `ssh:[USER@]HOST[:PORT]` | a host reached with `ssh`, using your ssh config |
+| `local` | this machine, on Linux |
+| `ssh:[USER@]HOST[:PORT]` | a host or VM reached with `ssh`, using your ssh config |
 | `docker:NAME`, `podman:NAME`, `nerdctl:NAME` | a running container |
+| `apple-container:NAME` | a container run by Apple's `container` tool |
 | `sbx:SANDBOX` | a Docker sbx sandbox |
 | `k8s:[NAMESPACE/]POD[/CONTAINER]` | a pod in kubectl's current context |
 | `incus:INSTANCE`, `lxc:INSTANCE` | an Incus or LXD instance |
+| `wsl:DISTRO` | a WSL distribution |
 | `exec:COMMAND` | any command that runs its arguments in the target, such as `exec:'docker compose exec -T web'` |
 
-The target needs only `sh` and a writable directory. On first contact rembro copies itself there over the exec command's stdin, and later sessions start the cached copy.
+The target needs only `sh` and a writable directory. On first contact rembro copies its agent there over the exec command's stdin, and later sessions start the cached copy. On Linux the agent is rembro's own binary, and on macOS and Windows it is rembro's Linux build for the target's architecture.
+
+## Containers and VMs
+
+- Docker Desktop, OrbStack, Colima, Rancher Desktop and Podman Desktop run containers in a Linux VM on macOS and Windows. `docker:`, `podman:` and `nerdctl:` reach those containers through the same CLIs, and `k8s:` reaches the Kubernetes clusters that some of these tools run.
+- [Apple's container tool](https://github.com/apple/container) runs each container in its own lightweight VM on Apple silicon Macs. `rembro apple-container:web` reaches servers that listen only on the container's loopback, and names that resolve only inside it.
+- On Windows, `wsl:DISTRO` reaches a WSL distribution, by the name `wsl --list` shows. With `--remote` and `rembro run`, windows from it appear through WSLg when Windows has no X server.
+- A QEMU VM needs one forwarded port for the guest's SSH server. Through it, rembro reaches every port in the guest, which QEMU's user networking otherwise hides from the host:
+
+  ```sh
+  qemu-system-x86_64 ... -nic user,hostfwd=tcp:127.0.0.1:2222-:22
+  rembro ssh:me@localhost:2222
+  ```
+
+  VMs from libvirt, UTM, Hyper-V, Parallels and VirtualBox work over `ssh:` in the same way, and Lima and Multipass VMs through `exec:` ([examples](docs/usage.md#vms)).
+- rembro has builds for x86_64, aarch64 and armv7 guests. An emulated guest of another architecture, such as riscv64, needs a static build of rembro for it, given with `--agent`.
 
 ## Getting started
 
@@ -93,10 +115,11 @@ Programs in the target can open pages in rembro's browser through `BROWSER` and 
 - `--x11-trusted` gives the target the same access to your X11 display that `ssh -Y` does, and so does an X server that can't make untrusted connections ([details](docs/security.md#x11)).
 - `--remote` and `rembro run` forward this machine's sound server, which programs in the target can record from; `--no-audio` turns it off ([details](docs/security.md#sound)).
 - `--trust-target-ca` lets the target read that profile's HTTPS traffic ([details](docs/security.md#trusting-the-targets-ca-certificates)).
+- On macOS and Windows, rembro can't tell which user connects to its SOCKS server, so other users of this machine can reach the target through it while rembro runs ([details](docs/security.md#the-socks-server)).
 
 ## Documentation
 
-- [docs/usage.md](docs/usage.md): targets, browsers, profiles, opening pages, `--debug`, `rembro run`, `rembro install` and every option.
+- [docs/usage.md](docs/usage.md): targets and VMs, browsers, profiles, opening pages, `--debug`, `rembro run`, `rembro install`, displays on macOS and Windows, and every option.
 - [docs/how-it-works.md](docs/how-it-works.md): the agent, its transport, other architectures, networking, display and sound forwarding, reconnects, and building rembro.
 - [docs/security.md](docs/security.md): what the target can see and do, debugging, X11, sound, CA trust and the local SOCKS server.
 

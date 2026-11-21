@@ -1,3 +1,4 @@
+#[cfg(target_os = "linux")]
 mod agent;
 mod attach;
 mod boot;
@@ -14,17 +15,21 @@ mod proto;
 mod remote;
 mod run;
 mod socks;
+mod sys;
 mod target;
 mod util;
 mod x11;
 mod x11sec;
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    match args.get(1).map(String::as_str) {
-        Some("agent") => agent::main(&args[2..]),
-        Some("open") => agent::open_main(&args[2..]),
-        _ => {}
+    #[cfg(target_os = "linux")]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        match args.get(1).map(String::as_str) {
+            Some("agent") => agent::main(&args[2..]),
+            Some("open") => agent::open_main(&args[2..]),
+            _ => {}
+        }
     }
     let cli = <cli::Cli as clap::Parser>::parse();
     let code = match host::run(cli) {

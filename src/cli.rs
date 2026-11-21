@@ -6,17 +6,20 @@ use crate::browser::Family;
 
 const AFTER_HELP: &str = "\
 Targets:
-  local                            this machine
-  ssh:[USER@]HOST[:PORT]           a host reached with ssh; your ssh config applies
+  local                            this machine, on Linux
+  ssh:[USER@]HOST[:PORT]           a host or VM reached with ssh; your ssh config applies
   docker:CONTAINER                 a running Docker container (also podman:, nerdctl:)
+  apple-container:CONTAINER        a container run by Apple's container tool on macOS
   sbx:SANDBOX                      a Docker sbx sandbox
   k8s:[NAMESPACE/]POD[/CONTAINER]  a Kubernetes pod in kubectl's current context
   incus:INSTANCE, lxc:INSTANCE     an Incus or LXD instance
+  wsl:DISTRO                       a WSL distribution on Windows
   exec:COMMAND                     any command that runs its arguments in the target,
                                    such as exec:'docker compose exec -T web'
 
-The target needs only sh. rembro copies itself there (to ~/.cache/rembro, or /tmp)
-the first time, and talks to that copy over the command's stdin and stdout.
+Targets run Linux, and need only sh. rembro copies its Linux agent there (to
+~/.cache/rembro, or /tmp) the first time, and talks to it over the command's stdin
+and stdout.
 
 Examples:
   rembro sbx:myapp                      open the sandbox's dev servers in a browser here
@@ -25,7 +28,7 @@ Examples:
   rembro --remote ssh:devbox            run Chromium on devbox and show its window here
   rembro --debug sbx:myapp              let an agent in the sandbox drive the browser
   rembro sbx:myapp -- --incognito       pass arguments to the browser
-  rembro run ssh:rpi gnome-calculator   run any program there, with its window here
+  rembro run ssh:devbox gimp            run any program there, with its window here
   rembro install docker:web firefox     install a browser in the target for --remote";
 
 #[derive(Parser, Debug)]
@@ -196,7 +199,8 @@ pub struct Common {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum DisplayArg {
-    /// Wayland through waypipe if this session is Wayland, otherwise X11
+    /// Wayland through waypipe if this session is Wayland, otherwise X11. With neither,
+    /// the target's own display if it has one, such as WSLg's in WSL
     Auto,
     /// Wayland through waypipe
     Wayland,

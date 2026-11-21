@@ -41,6 +41,46 @@ jobs:
           name: rembro
           path: out/
 
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: cargo test
+      - name: Build
+        run: |
+          mkdir -p out
+          for arch in aarch64 x86_64; do
+            cargo build --release --target "$arch-apple-darwin"
+            cp "target/$arch-apple-darwin/release/rembro" "out/rembro-$arch-macos"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rembro-macos
+          path: out/
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+      - name: Build
+        shell: bash
+        env:
+          # Links the C runtime in, so the build needs no Visual C++ redistributable.
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          cargo build --release
+          mkdir -p out
+          cp target/release/rembro.exe out/rembro-x86_64-windows.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rembro-windows
+          path: out/
+
   waypipe:
     runs-on: ubuntu-latest
     env:
@@ -62,7 +102,7 @@ jobs:
           path: out/
 
   release:
-    needs: [rembro, waypipe]
+    needs: [rembro, macos, windows, waypipe]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -70,12 +110,14 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      # Each archive holds rembro for its architecture, plus the agents and waypipe
-      # builds that rembro copies into targets.
+      # Each archive holds rembro for its system and architecture, plus the Linux agents it
+      # copies into targets. The Linux archives also hold the waypipe builds; macOS and
+      # Windows have no Wayland sessions to forward windows to, so theirs do not.
       - name: Package
         run: |
           cd dist
-          chmod +x rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7
+          chmod +x rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
+            rembro-aarch64-macos rembro-x86_64-macos
           for t in $TARGETS; do
             arch=${t%%:*}
             pkg=rembro-$arch-linux
@@ -89,8 +131,23 @@ jobs:
             cp licenses/* "$pkg/licenses/"
             tar -czf "$pkg.tar.gz" "$pkg"
           done
+          for pkg in rembro-aarch64-macos rembro-x86_64-macos rembro-x86_64-windows; do
+            mkdir -p "$pkg"
+            case $pkg in
+            *-windows) cp "$pkg.exe" "$pkg/rembro.exe" ;;
+            *) cp "$pkg" "$pkg/rembro" ;;
+            esac
+            for o in $TARGETS; do
+              cp "rembro-${o%%:*}" "$pkg/"
+            done
+            cp -r ../README.md ../docs ../LICENSE-MIT ../LICENSE-APACHE "$pkg/"
+            case $pkg in
+            *-windows) zip -qr "$pkg.zip" "$pkg" ;;
+            *) tar -czf "$pkg.tar.gz" "$pkg" ;;
+            esac
+          done
           sha256sum rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
-            rembro-*-linux.tar.gz waypipe-source.tar.gz > SHA256SUMS
+            rembro-*-linux.tar.gz rembro-*-macos.tar.gz rembro-x86_64-windows.zip waypipe-source.tar.gz > SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,4 +159,4 @@ jobs:
           cd dist
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes-file ../notes.md \
             rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
-            rembro-*-linux.tar.gz waypipe-source.tar.gz SHA256SUMS
+            rembro-*-linux.tar.gz rembro-*-macos.tar.gz rembro-x86_64-windows.zip waypipe-source.tar.gz SHA256SUMS

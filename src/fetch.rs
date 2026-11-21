@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use crate::util;
+use crate::{sys, util};
 
 const RELEASES: &str = "https://github.com/ScriptSmith/rembro/releases/download";
 
@@ -20,11 +20,7 @@ pub fn release_arch(uname: &str) -> Option<&'static str> {
 }
 
 fn cache_dir() -> PathBuf {
-    let base = match std::env::var("XDG_CACHE_HOME") {
-        Ok(d) if d.starts_with('/') => PathBuf::from(d),
-        _ => util::expand_home("~/.cache", util::home().as_deref()),
-    };
-    base.join("rembro").join(env!("CARGO_PKG_VERSION"))
+    util::cache_dir().join("rembro").join(env!("CARGO_PKG_VERSION"))
 }
 
 /// Finds `NAME-ARCH` (for example `waypipe-aarch64`) for the target's `uname -m`.
@@ -67,10 +63,9 @@ fn download(file: &str, dest: &Path, verbose: bool) -> Result<(), String> {
     let tmp = dir.join(format!(".{file}.{}", std::process::id()));
     fs::write(&tmp, &data)
         .and_then(|_| {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))
+            sys::set_mode(&tmp, 0o755);
+            fs::rename(&tmp, dest)
         })
-        .and_then(|_| fs::rename(&tmp, dest))
         .map_err(|e| format!("cannot write {}: {e}", dest.display()))
 }
 

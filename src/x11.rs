@@ -3,17 +3,19 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
 use crate::mux::Sock;
-use crate::{util, x11sec};
+use crate::{sys, util, x11sec};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Display {
-    /// A socket path, or a host for TCP. Empty means the local socket for `number`.
+    /// A socket path, or a host for TCP. Empty means the local socket for `number`, or on
+    /// Windows, TCP on this machine.
     host: String,
     pub number: u32,
 }
@@ -21,8 +23,20 @@ pub struct Display {
 impl Display {
     pub fn parse(s: &str) -> Option<Display> {
         let (host, rest) = s.rsplit_once(':')?;
-        let number = rest.split('.').next()?.parse().ok()?;
-        let host = if host == "unix" { "" } else { host };
+        let (number, screen) = match rest.split_once('.') {
+            Some((n, screen)) => (n, Some(screen)),
+            None => (rest, None),
+        };
+        let number = number.parse().ok()?;
+        // XQuartz on macOS names a socket by its whole path, such as
+        // /private/tmp/com.apple.launchd.x/org.xquartz:0.
+        let host = if host.starts_with('/') {
+            &s[..s.len() - screen.map_or(0, |sc| sc.len() + 1)]
+        } else if host == "unix" {
+            ""
+        } else {
+            host
+        };
         Some(Display { host: host.to_string(), number })
     }
 
@@ -31,25 +45,32 @@ impl Display {
     }
 
     pub fn connect(&self) -> Result<Sock, String> {
-        if self.host.starts_with('/') {
-            return UnixStream::connect(&self.host).map(Sock::Unix).map_err(|e| format!("other: X server: {e}"));
-        }
-        if self.host.is_empty() {
-            let path = format!("/tmp/.X11-unix/X{}", self.number);
-            match UnixStream::connect(&path) {
-                Ok(s) => return Ok(Sock::Unix(s)),
-                Err(e) => {
-                    use std::os::linux::net::SocketAddrExt;
-                    let addr = std::os::unix::net::SocketAddr::from_abstract_name(path.as_bytes())
-                        .map_err(|e| format!("other: {e}"))?;
-                    return UnixStream::connect_addr(&addr)
-                        .map(Sock::Unix)
-                        .map_err(|_| format!("other: X server: {e}"));
+        #[cfg(unix)]
+        {
+            if self.host.starts_with('/') {
+                return UnixStream::connect(&self.host).map(Sock::Unix).map_err(|e| format!("other: X server: {e}"));
+            }
+            if self.host.is_empty() {
+                let path = format!("/tmp/.X11-unix/X{}", self.number);
+                match UnixStream::connect(&path) {
+                    Ok(s) => return Ok(Sock::Unix(s)),
+                    #[cfg(target_os = "linux")]
+                    Err(e) => {
+                        use std::os::linux::net::SocketAddrExt;
+                        let addr = std::os::unix::net::SocketAddr::from_abstract_name(path.as_bytes())
+                            .map_err(|e| format!("other: {e}"))?;
+                        return UnixStream::connect_addr(&addr)
+                            .map(Sock::Unix)
+                            .map_err(|_| format!("other: X server: {e}"));
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    Err(e) => return Err(format!("other: X server: {e}")),
                 }
             }
         }
+        let host = if self.host.is_empty() { "127.0.0.1" } else { self.host.as_str() };
         let port = 6000 + self.number as u16;
-        TcpStream::connect((self.host.as_str(), port)).map(Sock::Tcp).map_err(|e| format!("other: X server: {e}"))
+        TcpStream::connect((host, port)).map(Sock::Tcp).map_err(|e| format!("other: X server: {e}"))
     }
 
     fn control(&self) -> Result<Sock, String> {
@@ -74,12 +95,12 @@ impl Display {
     /// A connection for the mux that admits only X clients presenting `cookie`, so a program
     /// in the target cannot reach the X server without it, whatever host access the server allows.
     pub fn gate(&self, cookie: Option<Vec<u8>>) -> Result<Sock, String> {
-        let (outer, inner) = UnixStream::pair().map_err(|e| format!("other: {e}"))?;
+        let (outer, inner) = Sock::pair().map_err(|e| format!("other: {e}"))?;
         let display = self.clone();
         thread::spawn(move || {
             let _ = admit(inner, &display, cookie.as_deref());
         });
-        Ok(Sock::Unix(outer))
+        Ok(outer)
     }
 
     /// The MIT-MAGIC-COOKIE-1 for this display from the Xauthority file, if there is one.
@@ -89,7 +110,7 @@ impl Display {
             None => util::expand_home("~/.Xauthority", util::home().as_deref()),
         };
         let data = fs::read(path).ok()?;
-        let host = util::hostname();
+        let host = sys::hostname();
         let number = self.number.to_string();
         let mut best = None;
         for e in parse_xauthority(&data) {
@@ -111,8 +132,8 @@ impl Display {
 
 /// Reads an X client's connection setup, refuses it unless it carries `cookie`, and
 /// otherwise joins it to the X server.
-fn admit(mut client: UnixStream, display: &Display, cookie: Option<&[u8]>) -> io::Result<()> {
-    client.set_read_timeout(Some(Duration::from_secs(30)))?;
+fn admit(mut client: Sock, display: &Display, cookie: Option<&[u8]>) -> io::Result<()> {
+    client.set_timeout(Some(Duration::from_secs(30)));
     let mut head = [0u8; 12];
     client.read_exact(&mut head)?;
     let little = match head[0] {
@@ -143,14 +164,14 @@ fn admit(mut client: UnixStream, display: &Display, cookie: Option<&[u8]>) -> io
         reply.resize(8 + words * 4, 0);
         return client.write_all(&reply);
     }
-    client.set_read_timeout(None)?;
+    client.set_timeout(None);
     let Ok(mut server) = display.connect() else { return Ok(()) };
     server.write_all(&head)?;
     server.write_all(&rest)?;
     let (mut server_r, mut client_w) = (server.try_clone()?, client.try_clone()?);
     let up = thread::spawn(move || {
         let _ = io::copy(&mut server_r, &mut client_w);
-        let _ = client_w.shutdown(Shutdown::Write);
+        client_w.shutdown(Shutdown::Write);
     });
     let _ = io::copy(&mut client, &mut server);
     server.shutdown(Shutdown::Write);
@@ -214,6 +235,9 @@ mod tests {
         assert_eq!(Display::parse("localhost:10.0"), Some(Display { host: "localhost".into(), number: 10 }));
         assert_eq!(Display::parse("unix:1"), Some(Display { host: String::new(), number: 1 }));
         assert_eq!(Display::parse("nonsense"), None);
+        let xquartz = "/private/tmp/com.apple.launchd.AbC/org.xquartz:0";
+        assert_eq!(Display::parse(xquartz), Some(Display { host: xquartz.into(), number: 0 }));
+        assert_eq!(Display::parse(&format!("{xquartz}.0")), Some(Display { host: xquartz.into(), number: 0 }));
     }
 
     #[test]
