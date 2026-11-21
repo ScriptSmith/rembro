@@ -21,6 +21,8 @@ rembro run ssh:devbox gimp                       # any GUI program, window shown
 rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
 ```
 
+Too big or complicated for your liking? Get most of the functionality with a 100 line [bash script](docs/bash.md).
+
 ## Use cases
 
 - Preview a web app running on a remote dev box, in a dev container or in a Docker sandbox, without `ssh -L` or `docker run -p`.
@@ -101,6 +103,7 @@ Programs in the target can open pages in rembro's browser through `BROWSER` and 
 - [docs/usage.md](docs/usage.md): targets, containers and VMs, browsers, profiles, opening pages, `--debug`, `rembro run`, `rembro install`, displays on macOS and Windows, and every option.
 - [docs/how-it-works.md](docs/how-it-works.md): the agent, its transport, other architectures, networking, display and sound forwarding, reconnects, and building rembro.
 - [docs/security.md](docs/security.md): what the target can see and do, debugging, X11, sound, CA trust and the local SOCKS server.
+- [docs/bash.md](docs/bash.md): rembro.sh, the core of rembro in a bash script, how it works, and what it leaves out.
 
 ## License
 
