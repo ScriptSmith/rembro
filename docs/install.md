@@ -1,6 +1,14 @@
 # Installing rembro
 
-On Linux and macOS, the [install script](../README.md#install) is the quickest way to install rembro. This page covers installing a release archive by hand, which also works on Windows, where the script doesn't run.
+This page covers the install script, installing a release archive by hand, which also works on Windows, where the script doesn't run, and installing with Cargo.
+
+## With the install script
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ScriptSmith/rembro/main/install.sh | sh
+```
+
+The script works on Linux and macOS. It downloads the latest release for this machine, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/lib/rembro` and links `~/.local/bin/rembro` to it. `curl ... | REMBRO_VERSION=0.1.0 sh` installs a particular release, and `REMBRO_PREFIX` puts it somewhere other than `~/.local`.
 
 ## From a release archive
 
@@ -20,3 +28,12 @@ Unzip `rembro-x86_64-windows.zip` and add the folder it makes to your `PATH`. Wi
 ## macOS
 
 If you download a macOS archive with a web browser, macOS won't run the unsigned binary until you clear the quarantine flag with `xattr -dr com.apple.quarantine` on the unpacked folder.
+
+## With Cargo
+
+```sh
+cargo install rembro --target x86_64-unknown-linux-musl  # on Linux
+cargo install rembro                                     # on macOS and Windows
+```
+
+A Cargo install has no builds for other architectures or waypipe next to it. rembro downloads the ones it needs from the GitHub release of the same version, checks them against the release's `SHA256SUMS`, and keeps them in its cache: `~/.cache/rembro/VERSION` on Linux, `~/Library/Caches/rembro/VERSION` on macOS and `%LOCALAPPDATA%\rembro\VERSION` on Windows. On macOS and Windows that includes the Linux build it copies into every target. On Linux, a plain `cargo install rembro` also works, but it links against this machine's glibc. Since rembro copies its own binary into the target, that build fails in Alpine containers and on distributions with an older glibc. The musl build runs on any Linux.
