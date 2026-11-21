@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <g id="hand">
+      <rect x="166" y="112" width="40" height="26" rx="8"/>
+      <rect x="188" y="60" width="24" height="50" rx="12"/>
+      <rect x="187" y="94" width="38" height="52" rx="13"/>
+      <rect x="200" y="94" width="40" height="18" rx="9"/>
+      <rect x="200" y="111" width="38" height="17" rx="8.5"/>
+      <rect x="200" y="127" width="35" height="18" rx="9"/>
+    </g>
+  </defs>
+  <rect width="1280" height="640" fill="#fffaf3"/>
+  <g transform="translate(535 106) scale(.82)" stroke="#1c2230" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
+    <g transform="translate(-4 -14) rotate(6 214 140)">
+      <use href="#hand"/>
+      <use href="#hand" fill="#fff4e3" stroke="none"/>
+      <path d="M215 111.5H233M215 127.5H230" fill="none" stroke-width="6"/>
+    </g>
+    <g transform="rotate(-8 116 170)">
+      <rect x="48" y="30" width="136" height="150" rx="16" fill="#f26b38"/>
+      <path d="M48 68H184V180H48Z" fill="#fff4e3"/>
+      <rect x="124" y="43" width="44" height="12" rx="6" fill="#fff4e3" stroke="none"/>
+      <g fill="#fff4e3" stroke="none">
+        <circle cx="70" cy="49" r="6"/>
+        <circle cx="88" cy="49" r="6"/>
+        <circle cx="106" cy="49" r="6"/>
+      </g>
+      <circle cx="96" cy="100" r="8" fill="#1c2230" stroke="none"/>
+      <circle cx="136" cy="100" r="8" fill="#1c2230" stroke="none"/>
+      <path d="M95 119Q116 143 137 119" fill="none"/>
+    </g>
+    <rect x="20" y="150" width="216" height="82" rx="16" fill="#f26b38"/>
+    <path d="M20 191H236" fill="none"/>
+    <path d="M112 170.5H210M112 211.5H210" fill="none" stroke-width="8"/>
+    <g stroke="none">
+      <circle cx="44" cy="170.5" r="6" fill="#7ce8a8"/>
+      <circle cx="64" cy="170.5" r="6" fill="#7ce8a8"/>
+      <circle cx="84" cy="170.5" r="6" fill="#4a9e74"/>
+      <circle cx="44" cy="211.5" r="6" fill="#7ce8a8"/>
+      <circle cx="64" cy="211.5" r="6" fill="#7ce8a8"/>
+      <circle cx="84" cy="211.5" r="6" fill="#4a9e74"/>
+    </g>
+  </g>
+  <g fill="#1c2230" font-family="Adwaita Sans, Inter, sans-serif" text-anchor="middle">
+    <text x="640" y="394" font-size="76" font-weight="700" letter-spacing="-1.5">rembro</text>
+    <text x="640" y="454" font-size="31" fill="#3d4556">Open a browser that uses the networking of</text>
+    <text x="640" y="498" font-size="31" fill="#3d4556">another host, container, sandbox, or VM.</text>
+  </g>
+</svg>
