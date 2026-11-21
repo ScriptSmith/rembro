@@ -1,20 +1,31 @@
 # rembro
 
-rembro opens a web browser (or any application) that uses the network of an SSH host, a container, a Docker sbx sandbox, a Kubernetes pod or an Incus instance. In that browser, `localhost` is the target's loopback and host names resolve with the target's DNS, so `db` in a Compose project or `api.shop.svc` in a cluster work, and so do addresses that only the target can reach.
+rembro opens a browser on your desktop that connects from inside an SSH server, Docker container or Kubernetes pod. `localhost:3000` is the dev server in the container, and names like `db` or `api.shop.svc` resolve the way they do in there, so you never forward a port.
 
+Run `rembro ssh:devbox` and a tab opens for every web server listening on devbox. Servers that start later get a tab too.
+
+```sh
+rembro ssh:devbox                                # a tab for each dev server on devbox
+rembro docker:shop-web-1 http://api:8000         # a Compose service, by its name
+rembro k8s:shop/api-7d9f http://orders.shop.svc  # a cluster service, no kubectl port-forward
+rembro ssh:bastion http://10.0.4.12:3000         # an address only the bastion can reach
+rembro --remote ssh:devbox                       # run the browser on devbox, show its window here
+rembro --debug sbx:myapp                         # let an AI agent in the sandbox drive the browser
+rembro run ssh:rpi gnome-calculator              # any GUI program, window shown here
+rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
 ```
-rembro sbx:qut                    # open the sandbox's dev servers here
-rembro docker:web http://localhost:3000
-rembro k8s:shop/api-7d9f http://orders.shop.svc:8080
-rembro --remote ssh:devbox        # run the browser on devbox, show its window here
-rembro --debug sbx:qut            # let an agent in the sandbox drive the browser
-rembro run ssh:rpi gnome-calculator
-rembro install docker:web firefox # put a browser in the container for --remote
-```
 
-The browser runs in one of two places:
+## Use cases
 
-- On this machine, by default. rembro points the browser at a SOCKS5 proxy on this machine's loopback, and the target makes every connection for it. You keep your own browser, fonts, GPU and window manager, with a separate profile for each target.
+- Preview a web app running on a remote dev box, in a dev container or in a Docker sandbox, without `ssh -L` or `docker run -p`.
+- Open a Kubernetes service, an admin UI or a metrics dashboard without `kubectl port-forward`, using cluster DNS names.
+- Reach internal sites and private IPs that only a bastion host or VPN gateway can see, without setting up an `ssh -D` SOCKS proxy by hand.
+- Let an AI coding agent in a sandbox drive a real browser with Playwright or Puppeteer over CDP or WebDriver BiDi, while you watch.
+- Run graphical Linux programs on a server or Raspberry Pi and see their windows on your Wayland or X11 desktop, with sound.
+
+## Where the browser runs
+
+- On this machine, by default. rembro points the browser at a SOCKS5 proxy on this machine's loopback, and the target makes every connection for it, DNS lookups included. You keep your own browser, fonts, GPU and window manager, with a separate profile for each target.
 - In the target, with `--remote`. Its window comes to this desktop through [waypipe](https://gitlab.freedesktop.org/mstoeckl/waypipe) on Wayland or through a forwarded X11 connection, and its sound plays here.
 
 `rembro run` starts any other graphical program in the target and shows its windows here in the same way.
@@ -23,9 +34,15 @@ rembro runs on Linux, and targets must be Linux too. It carries TCP only, so whe
 
 ## Install
 
-Static builds for x86_64, aarch64 and armv7 Linux are on the [releases page](https://github.com/ScriptSmith/rembro/releases). Each archive holds `rembro`, the rembro builds for the other two architectures, and static waypipe builds for all three. rembro copies those into targets that need them, so keep them next to `rembro`:
-
+```sh
+curl -fsSL https://raw.githubusercontent.com/ScriptSmith/rembro/main/install.sh | sh
 ```
+
+The script downloads the latest release for this machine's architecture, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/lib/rembro` and links `~/.local/bin/rembro` to it. `curl ... | REMBRO_VERSION=0.1.0 sh` installs a particular release, and `REMBRO_PREFIX` puts it somewhere other than `~/.local`.
+
+To install by hand, take an archive from the [releases page](https://github.com/ScriptSmith/rembro/releases). There are static builds for x86_64, aarch64 and armv7 Linux. Each archive holds `rembro`, the rembro builds for the other two architectures, and static waypipe builds for all three. rembro copies those into targets that need them, so keep them next to `rembro`:
+
+```sh
 mkdir -p ~/.local/lib/rembro ~/.local/bin
 curl -L https://github.com/ScriptSmith/rembro/releases/latest/download/rembro-x86_64-linux.tar.gz |
   tar -xz -C ~/.local/lib/rembro --strip-components=1
@@ -34,7 +51,7 @@ ln -sf ~/.local/lib/rembro/rembro ~/.local/bin/rembro
 
 With Cargo:
 
-```
+```sh
 cargo install rembro --target x86_64-unknown-linux-musl
 ```
 
