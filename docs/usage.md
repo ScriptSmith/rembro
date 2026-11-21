@@ -44,17 +44,17 @@ For a command or path, rembro guesses the family from the file name: names conta
 
 Playwright WebKit takes no proxy on its command line, so it only works with `--remote`. On this machine, use Epiphany or MiniBrowser for WebKit.
 
-Arguments after `--` go to the browser: `rembro sbx:qut -- --incognito`.
+Arguments after `--` go to the browser: `rembro sbx:myapp -- --incognito`.
 
 ## Profiles
 
-rembro never uses your regular browser profile unless you ask it to. Profiles live in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-qut`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. The name is `default`, or `agent` with `--debug`, so a browser that a program can drive never shares cookies with the one you use.
+rembro never uses your regular browser profile unless you ask it to. Profiles live in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-myapp`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. The name is `default`, or `agent` with `--debug`, so a browser that a program can drive never shares cookies with the one you use.
 
 - `--profile NAME` picks another name.
 - `--profile PATH` uses any directory. rembro treats a value as a path when it contains `/` or is `~`.
 - `--temp-profile` uses a new profile that is deleted when the browser exits. It can't be combined with `--profile`.
 
-To start from your regular logins without touching them, copy your regular profile into rembro's directory, for example `cp -r ~/.config/chromium ~/.local/share/rembro/profiles/sbx-qut/chromium/default`.
+To start from your regular logins without touching them, copy your regular profile into rembro's directory, for example `cp -r ~/.config/chromium ~/.local/share/rembro/profiles/sbx-myapp/chromium/default`.
 
 When the browser runs here and the profile is already open in another rembro window for the same target, the URLs open in that window.
 
@@ -90,8 +90,8 @@ Where the pages open depends on the mode:
 `--debug` exposes the browser's debugging endpoint inside the target, on `127.0.0.1:9222` (or a free port if 9222 is taken), and opens a tab that shows how to connect:
 
 ```
-$ rembro --debug sbx:qut
-Programs in sbx:qut can drive this browser over CDP at http://127.0.0.1:9222
+$ rembro --debug sbx:myapp
+Programs in sbx:myapp can drive this browser over CDP at http://127.0.0.1:9222
   playwright-cli attach --cdp=http://127.0.0.1:9222
   ws://127.0.0.1:9222/devtools/browser/3fc09add-65ff-4426-9ef0-235c27b80487
 ```

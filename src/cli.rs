@@ -19,12 +19,12 @@ The target needs only sh. rembro copies itself there (to ~/.cache/rembro, or /tm
 the first time, and talks to that copy over the command's stdin and stdout.
 
 Examples:
-  rembro sbx:qut                        open the sandbox's dev servers in a browser here
+  rembro sbx:myapp                      open the sandbox's dev servers in a browser here
   rembro docker:web http://localhost:3000 -b firefox
   rembro k8s:shop/api-7d9f http://orders.shop.svc:8080
   rembro --remote ssh:devbox            run Chromium on devbox and show its window here
-  rembro --debug sbx:qut                let an agent in the sandbox drive the browser
-  rembro sbx:qut -- --incognito         pass arguments to the browser
+  rembro --debug sbx:myapp              let an agent in the sandbox drive the browser
+  rembro sbx:myapp -- --incognito       pass arguments to the browser
   rembro run ssh:rpi gnome-calculator   run any program there, with its window here
   rembro install docker:web firefox     install a browser in the target for --remote";
 
