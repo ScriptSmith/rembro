@@ -1,12 +1,14 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
   <style>
-    .pop { animation: pop .9s .3s both }
-    .rock { transform-origin: 124px 196px; animation: rock 3.6s 1.2s infinite }
+    .pop { animation: pop 14s .3s infinite both }
+    .rock { transform-origin: 124px 196px; animation: rock 3.5s 1.2s infinite }
     @keyframes pop {
       0% { transform: translateY(150px); animation-timing-function: cubic-bezier(.2, .7, .3, 1) }
-      60% { transform: translateY(-12px); animation-timing-function: ease-in-out }
-      80% { transform: translateY(4px); animation-timing-function: ease-in-out }
-      100% { transform: none }
+      4% { transform: translateY(-12px); animation-timing-function: ease-in-out }
+      5.2% { transform: translateY(4px); animation-timing-function: ease-in-out }
+      6.4%, 90% { transform: none; animation-timing-function: ease-out }
+      91.5% { transform: translateY(-8px); animation-timing-function: cubic-bezier(.5, 0, .9, .4) }
+      94%, 100% { transform: translateY(150px) }
     }
     @keyframes rock {
       0% { transform: none; animation-timing-function: cubic-bezier(.3, .6, .6, 1) }
@@ -26,7 +28,7 @@
   </style>
   <defs>
     <g id="hand">
-      <rect x="196" y="134" width="26" height="40" rx="6"/>
+      <rect x="166" y="112" width="40" height="26" rx="8"/>
       <rect x="188" y="60" width="24" height="50" rx="12"/>
       <rect x="187" y="94" width="38" height="52" rx="13"/>
       <rect x="200" y="94" width="40" height="18" rx="9"/>
@@ -34,13 +36,18 @@
       <rect x="200" y="127" width="35" height="18" rx="9"/>
     </g>
     <clipPath id="above">
-      <rect x="-20" y="-40" width="300" height="236"/>
+      <rect x="-20" y="-40" width="300" height="190"/>
     </clipPath>
   </defs>
   <g stroke="#1c2230" stroke-width="10" stroke-linejoin="round" stroke-linecap="round">
     <g clip-path="url(#above)">
       <g class="pop">
         <g class="rock">
+          <g transform="translate(-4 -14) rotate(6 214 140)">
+            <use href="#hand"/>
+            <use href="#hand" fill="#fff4e3" stroke="none"/>
+            <path d="M215 111.5H233M215 127.5H230" fill="none" stroke-width="6"/>
+          </g>
           <g transform="rotate(-8 116 170)">
             <rect x="48" y="30" width="136" height="150" rx="16" fill="#f26b38"/>
             <path d="M48 68H184V180H48Z" fill="#fff4e3"/>
@@ -62,11 +69,6 @@
                 values="M100 122Q116 136 132 122;M95 119Q116 143 137 119;M95 119Q116 143 137 119;M100 122Q116 136 132 122;M100 122Q116 136 132 122"
                 keyTimes="0;.04;.22;.3;1" keySplines=".4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
             </path>
-          </g>
-          <g transform="rotate(6 214 140)">
-            <use href="#hand"/>
-            <use href="#hand" fill="#fff4e3" stroke="none"/>
-            <path d="M215 111.5H233M215 127.5H230" fill="none" stroke-width="6"/>
           </g>
         </g>
       </g>
