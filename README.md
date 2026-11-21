@@ -46,16 +46,7 @@ curl -fsSL https://raw.githubusercontent.com/ScriptSmith/rembro/main/install.sh 
 
 The script works on Linux and macOS. It downloads the latest release for this machine, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/lib/rembro` and links `~/.local/bin/rembro` to it. `curl ... | REMBRO_VERSION=0.1.0 sh` installs a particular release, and `REMBRO_PREFIX` puts it somewhere other than `~/.local`.
 
-To install by hand, take an archive from the [releases page](https://github.com/ScriptSmith/rembro/releases). There are static builds for x86_64, aarch64 and armv7 Linux, builds for x86_64 and aarch64 macOS, and an x86_64 build for Windows. Each archive holds `rembro` and the Linux builds of rembro that it copies into targets: the other two architectures in a Linux archive, and all three in a macOS or Windows one. The Linux archives also hold static waypipe builds for all three architectures. Keep these files next to `rembro`:
-
-```sh
-mkdir -p ~/.local/lib/rembro ~/.local/bin
-curl -L https://github.com/ScriptSmith/rembro/releases/latest/download/rembro-x86_64-linux.tar.gz |
-  tar -xz -C ~/.local/lib/rembro --strip-components=1
-ln -sf ~/.local/lib/rembro/rembro ~/.local/bin/rembro
-```
-
-On Windows, unzip `rembro-x86_64-windows.zip` and add the folder it makes to your `PATH`. Windows 11 on Arm runs the x86_64 build under emulation. If you download a macOS archive with a web browser, macOS won't run the unsigned binary until you clear the quarantine flag with `xattr -dr com.apple.quarantine` on the unpacked folder.
+[docs/install.md](docs/install.md) describes installing a release archive by hand, which also works on Windows, where the script doesn't run.
 
 With Cargo:
 
@@ -82,20 +73,7 @@ A Cargo install has no builds for other architectures or waypipe next to it. rem
 
 The target needs only `sh` and a writable directory. On first contact rembro copies its agent there over the exec command's stdin, and later sessions start the cached copy. On Linux the agent is rembro's own binary, and on macOS and Windows it is rembro's Linux build for the target's architecture.
 
-## Containers and VMs
-
-- Docker Desktop, OrbStack, Colima, Rancher Desktop and Podman Desktop run containers in a Linux VM on macOS and Windows. `docker:`, `podman:` and `nerdctl:` reach those containers through the same CLIs, and `k8s:` reaches the Kubernetes clusters that some of these tools run.
-- [Apple's container tool](https://github.com/apple/container) runs each container in its own lightweight VM on Apple silicon Macs. `rembro apple-container:web` reaches servers that listen only on the container's loopback, and names that resolve only inside it.
-- On Windows, `wsl:DISTRO` reaches a WSL distribution, by the name `wsl --list` shows. With `--remote` and `rembro run`, windows from it appear through WSLg when Windows has no X server.
-- A QEMU VM needs one forwarded port for the guest's SSH server. Through it, rembro reaches every port in the guest, which QEMU's user networking otherwise hides from the host:
-
-  ```sh
-  qemu-system-x86_64 ... -nic user,hostfwd=tcp:127.0.0.1:2222-:22
-  rembro ssh:me@localhost:2222
-  ```
-
-  VMs from libvirt, UTM, Hyper-V, Parallels and VirtualBox work over `ssh:` in the same way, and Lima and Multipass VMs through `exec:` ([examples](docs/usage.md#vms)).
-- rembro has builds for x86_64, aarch64 and armv7 guests. An emulated guest of another architecture, such as riscv64, needs a static build of rembro for it, given with `--agent`.
+[Containers and VMs](docs/usage.md#containers-and-vms) covers Docker Desktop and similar tools on macOS and Windows, Apple's container tool, WSL, and VMs such as QEMU.
 
 ## Getting started
 
@@ -119,7 +97,8 @@ Programs in the target can open pages in rembro's browser through `BROWSER` and 
 
 ## Documentation
 
-- [docs/usage.md](docs/usage.md): targets and VMs, browsers, profiles, opening pages, `--debug`, `rembro run`, `rembro install`, displays on macOS and Windows, and every option.
+- [docs/install.md](docs/install.md): installing a release archive by hand on Linux, macOS and Windows.
+- [docs/usage.md](docs/usage.md): targets, containers and VMs, browsers, profiles, opening pages, `--debug`, `rembro run`, `rembro install`, displays on macOS and Windows, and every option.
 - [docs/how-it-works.md](docs/how-it-works.md): the agent, its transport, other architectures, networking, display and sound forwarding, reconnects, and building rembro.
 - [docs/security.md](docs/security.md): what the target can see and do, debugging, X11, sound, CA trust and the local SOCKS server.
 

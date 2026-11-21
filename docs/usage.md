@@ -1,6 +1,6 @@
 # Using rembro
 
-This page covers targets and VMs, choosing a browser, profiles, opening pages, letting a program drive the browser, `rembro run`, `rembro install`, displays on macOS and Windows, and the command-line options.
+This page covers targets, containers and VMs, choosing a browser, profiles, opening pages, letting a program drive the browser, `rembro run`, `rembro install`, displays on macOS and Windows, and the command-line options.
 
 ## Targets
 
@@ -22,19 +22,30 @@ This page covers targets and VMs, choosing a browser, profiles, opening pages, l
 
 The target must run Linux, and needs only `sh` and a writable directory. [How it works](how-it-works.md#the-agent) describes what rembro copies there.
 
-### VMs
+### Containers and VMs
+
+- Docker Desktop, OrbStack, Colima, Rancher Desktop and Podman Desktop run containers in a Linux VM on macOS and Windows. `docker:`, `podman:` and `nerdctl:` reach those containers through the same CLIs, and `k8s:` reaches the Kubernetes clusters that some of these tools run.
+- [Apple's container tool](https://github.com/apple/container) runs each container in its own lightweight VM on Apple silicon Macs. `rembro apple-container:web` reaches servers that listen only on the container's loopback, and names that resolve only inside it.
+- On Windows, `wsl:DISTRO` reaches a WSL distribution, by the name `wsl --list` shows. With `--remote` and `rembro run`, windows from it appear through WSLg when Windows has no X server ([Displays on macOS and Windows](#displays-on-macos-and-windows)).
 
 rembro reaches a VM over SSH, or through any command that runs programs in it:
 
 | VM | Target |
 |---|---|
-| QEMU with user networking, started with `-nic user,hostfwd=tcp:127.0.0.1:2222-:22` | `ssh:me@localhost:2222` |
+| QEMU with user networking | `ssh:me@localhost:2222` |
 | libvirt, UTM, Hyper-V, Parallels, VirtualBox | `ssh:me@ADDRESS` |
 | Lima | `exec:'limactl shell default'` |
 | Multipass | `exec:'multipass exec myvm --'` |
 | WSL | `wsl:Ubuntu` |
 
-One SSH connection is enough: rembro reaches every port in the guest through it, including the ones that QEMU's user networking doesn't forward. A guest that emulates another architecture gets the matching agent when rembro has a build for it (x86_64, aarch64 or armv7). For any other, such as riscv64, pass a static build with `--agent`.
+A QEMU VM needs one forwarded port for the guest's SSH server. Through it, rembro reaches every port in the guest, which QEMU's user networking otherwise hides from the host:
+
+```sh
+qemu-system-x86_64 ... -nic user,hostfwd=tcp:127.0.0.1:2222-:22
+rembro ssh:me@localhost:2222
+```
+
+A guest that emulates another architecture gets the matching agent when rembro has a build for it (x86_64, aarch64 or armv7). For any other, such as riscv64, pass a static build with `--agent`.
 
 ## Choosing a browser
 
