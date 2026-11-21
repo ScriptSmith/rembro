@@ -54,7 +54,7 @@ jobs:
           mkdir -p out
           for arch in aarch64 x86_64; do
             cargo build --release --target "$arch-apple-darwin"
-            cp "target/$arch-apple-darwin/release/rembro" "out/rembro-$arch-macos"
+            cp "target/$arch-apple-darwin/release/rembro" "out/rembro-macos-$arch"
           done
       - uses: actions/upload-artifact@v4
         with:
@@ -75,7 +75,7 @@ jobs:
         run: |
           cargo build --release
           mkdir -p out
-          cp target/release/rembro.exe out/rembro-x86_64-windows.exe
+          cp target/release/rembro.exe out/rembro-windows-x86_64.exe
       - uses: actions/upload-artifact@v4
         with:
           name: rembro-windows
@@ -117,7 +117,7 @@ jobs:
         run: |
           cd dist
           chmod +x rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
-            rembro-aarch64-macos rembro-x86_64-macos
+            rembro-macos-aarch64 rembro-macos-x86_64
           for t in $TARGETS; do
             arch=${t%%:*}
             pkg=rembro-$arch-linux
@@ -131,18 +131,20 @@ jobs:
             cp licenses/* "$pkg/licenses/"
             tar -czf "$pkg.tar.gz" "$pkg"
           done
-          for pkg in rembro-aarch64-macos rembro-x86_64-macos rembro-x86_64-windows; do
+          for host in macos:aarch64 macos:x86_64 windows:x86_64; do
+            os=${host%%:*} arch=${host#*:}
+            pkg=rembro-$arch-$os
             mkdir -p "$pkg"
-            case $pkg in
-            *-windows) cp "$pkg.exe" "$pkg/rembro.exe" ;;
-            *) cp "$pkg" "$pkg/rembro" ;;
+            case $os in
+            windows) cp "rembro-windows-$arch.exe" "$pkg/rembro.exe" ;;
+            *) cp "rembro-macos-$arch" "$pkg/rembro" ;;
             esac
             for o in $TARGETS; do
               cp "rembro-${o%%:*}" "$pkg/"
             done
             cp -r ../README.md ../docs ../LICENSE-MIT ../LICENSE-APACHE "$pkg/"
-            case $pkg in
-            *-windows) zip -qr "$pkg.zip" "$pkg" ;;
+            case $os in
+            windows) zip -qr "$pkg.zip" "$pkg" ;;
             *) tar -czf "$pkg.tar.gz" "$pkg" ;;
             esac
           done

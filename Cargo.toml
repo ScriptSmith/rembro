@@ -1,6 +1,6 @@
 [package]
 name = "rembro"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Open a browser that uses the network of an SSH host, container, sandbox or Kubernetes pod"
