@@ -28,4 +28,5 @@ The browser gets the same proxy settings that rembro gives it: Chromium's flags 
 - Any user on this machine can reach the target through its SOCKS port while it runs. rembro refuses other users' connections on Linux.
 - A page that can't connect shows an empty response, because the script answers the browser's SOCKS request before the target has connected.
 - It has none of `--remote`, `--debug`, `rembro run`, `rembro install`, sound forwarding, `--loopback-only`, `--target-proxy` or `--trust-target-ca`, and programs in the target can't open pages in its browser.
+- It takes one target, not a chain such as `ssh:bastion,ssh:box,docker:web`.
 - It runs only on Linux, with Chromium-based browsers and Firefox.

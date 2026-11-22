@@ -8,6 +8,8 @@ When the browser runs here, the agent in the target resolves every host name and
 
 With `--remote`, the browser and its profile live in the target, so the target has its cookies, history and everything it shows.
 
+In a chain of targets, the session passes through every target before the last, so each of them can see and change it as the last one can. Hosts that `ssh -J` jumps through are the exception: they forward an encrypted SSH connection.
+
 rembro answers no requests from the agent. The agent sends rembro program output, exit statuses and URLs to open, and it can open connections back to this machine only to the endpoints the session set up: the debugging endpoint, the waypipe socket, the X11 display and the sound server.
 
 rembro keeps a separate profile for each target, and a browser started with `--debug` uses its own `agent` profile, so a program that drives it doesn't get the cookies of the browser you use. [Profiles](usage.md#profiles) has the details.

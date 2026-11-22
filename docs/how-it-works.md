@@ -10,7 +10,7 @@ The script looks for a cached agent in `~/.cache/rembro` (or `$XDG_CACHE_HOME/re
 
 rembro carries every connection, command and file over that one stdin/stdout pair. Calls, events and any number of byte streams share it, and each stream has its own 1 MiB send window in each direction, so one slow reader can't stall the others. Both sides send a ping every 15 seconds. Nothing listens on the target's network except the `--debug` endpoint and the X11 display described below.
 
-rembro runs `ssh` with `-T -e none -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, and Incus and LXD with `exec --mode=non-interactive`.
+rembro runs `ssh` with `-T -e none -o ServerAliveInterval=15 -o ServerAliveCountMax=4`, and Incus and LXD with `exec --mode=non-interactive`. For a chain of targets, it nests their commands, quotes the inner command line for each `ssh`, and joins adjacent `ssh:` targets into one `ssh -J`.
 
 ## Other architectures
 

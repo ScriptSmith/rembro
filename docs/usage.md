@@ -15,12 +15,27 @@ This page covers targets, containers and VMs, choosing a browser, profiles, open
 | `incus:INSTANCE`, `lxc:INSTANCE` | `incus exec` or `lxc exec` |
 | `wsl:DISTRO` | `wsl.exe --distribution DISTRO --exec`, on Windows |
 | `exec:COMMAND` | `COMMAND sh -c ...`, for example `exec:'docker compose exec -T web'` or `exec:'kubectl --context prod exec -i web --'` |
+| `TARGET,TARGET...` | each target's command inside the one before it, so `ssh:bastion,ssh:box,docker:web` runs `ssh -J bastion box docker exec -i web sh -c ...` ([Targets inside targets](#targets-inside-targets)) |
 
 `localhost` is another name for `local`, and `kube:` and `kubectl:` are other names for `k8s:`. A `//` after the colon is ignored, so `ssh://me@box:2222` also works.
 
-`exec:` splits COMMAND into words the way a shell would, without expansions, and appends its own arguments to them as separate words. That suits the `exec` subcommands of container tools. It does not quote the arguments for a remote shell, so use `ssh:` for SSH.
+`exec:` splits COMMAND into words the way a shell would, without expansions, and appends its own arguments to them as separate words. That suits the `exec` subcommands of container tools. It does not quote the arguments for a remote shell, so rembro refuses an `exec:` command that runs `ssh`. Use `ssh:`, or a chain such as `ssh:box,docker:web`, and put ssh options in your ssh config.
 
 The target must run Linux, and needs only `sh` and a writable directory. [How it works](how-it-works.md#the-agent) describes what rembro copies there.
+
+### Targets inside targets
+
+Join targets with commas, outermost first, to reach one through the others:
+
+```sh
+rembro ssh:bastion,ssh:box,sbx:dev,docker:web
+```
+
+rembro runs each target's command inside the one before it, and quotes the rest of the command line for the remote shell of each SSH host. Each tool has to be installed where its part of the chain runs: here `sbx` on box, and `docker` in the dev sandbox. Only the last target needs a writable directory for the agent.
+
+Adjacent `ssh:` targets become one `ssh -J`, so `ssh:bastion,ssh:box` runs `ssh -J bastion box`. Your keys and ssh config stay on this machine, and the jump hosts need to allow TCP forwarding, as they do for any `ssh -J`. For one bastion, you can instead set `ProxyJump bastion` for box in your ssh config and use `ssh:box`.
+
+A comma starts the next target only when a target type and a colon follow it, so commas inside an `exec:` command stay part of the command. `local` can't be part of a chain. Each chain gets its own profiles, as other targets do.
 
 ### Containers and VMs
 

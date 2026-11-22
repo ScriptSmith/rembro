@@ -16,6 +16,8 @@ Targets:
   wsl:DISTRO                       a WSL distribution on Windows
   exec:COMMAND                     any command that runs its arguments in the target,
                                    such as exec:'docker compose exec -T web'
+  TARGET,TARGET...                 a target inside the one before it, outermost first,
+                                   such as ssh:bastion,ssh:box,docker:web
 
 Targets run Linux, and need only sh. rembro copies its Linux agent there (to
 ~/.cache/rembro, or /tmp) the first time, and talks to it over the command's stdin
@@ -25,6 +27,7 @@ Examples:
   rembro sbx:myapp                      open the sandbox's dev servers in a browser here
   rembro docker:web http://localhost:3000 -b firefox
   rembro k8s:shop/api-7d9f http://orders.shop.svc:8080
+  rembro ssh:bastion,ssh:box,docker:web a container on a host behind a bastion
   rembro --remote ssh:devbox            run Chromium on devbox and show its window here
   rembro --debug sbx:myapp              let an agent in the sandbox drive the browser
   rembro sbx:myapp -- --incognito       pass arguments to the browser

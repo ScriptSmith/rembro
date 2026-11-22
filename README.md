@@ -13,6 +13,7 @@ rembro ssh:devbox                                # a tab for each dev server on 
 rembro docker:shop-web-1 http://api:8000         # a Compose service, by its name
 rembro k8s:shop/api-7d9f http://orders.shop.svc  # a cluster service, no kubectl port-forward
 rembro ssh:bastion http://10.0.4.12:3000         # an address only the bastion can reach
+rembro ssh:bastion,ssh:box,docker:web            # a container on a host behind the bastion
 rembro --remote ssh:devbox                       # run the browser on devbox, show its window here
 rembro --debug sbx:myapp                         # let an AI agent in the sandbox drive the browser
 rembro run ssh:devbox gimp                       # any GUI program, window shown here
@@ -55,6 +56,7 @@ Too big or complicated for your liking? Get most of the functionality with a 100
 | `incus:INSTANCE`, `lxc:INSTANCE` | an Incus or LXD instance |
 | `wsl:DISTRO` | a WSL distribution |
 | `exec:COMMAND` | any command that runs its arguments in the target, such as `exec:'docker compose exec -T web'` |
+| `TARGET,TARGET...` | a target inside the one before it, such as `ssh:bastion,ssh:box,sbx:dev,docker:web` |
 
 ## Getting started
 
