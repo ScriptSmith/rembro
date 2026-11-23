@@ -428,6 +428,14 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             }
             if let Some(port) = p.debug_port {
                 l.argv.push(format!("--remote-debugging-port={port}"));
+                // Playwright's flags for the same problem: without them, a page in a minimized,
+                // covered or background window is throttled, and screenshots of it never finish.
+                l.argv.extend([
+                    "--enable-features=CDPScreenshotNewSurface".into(),
+                    "--disable-backgrounding-occluded-windows".into(),
+                    "--disable-renderer-backgrounding".into(),
+                    "--disable-background-timer-throttling".into(),
+                ]);
             }
         }
         Family::Firefox => {
@@ -446,6 +454,15 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                 ("datareporting.policy.dataSubmissionPolicyBypassNotification", "true".into()),
                 ("toolkit.telemetry.reportingpolicy.firstRun", "false".into()),
             ];
+            // Firefox copies user.js into prefs.js, so these are set either way: Playwright's
+            // values with --debug, which keep timers in background tabs at full speed, and
+            // Firefox's defaults otherwise.
+            let (timeout, budget) = if p.debug_port.is_some() { ("0", "false") } else { ("1000", "true") };
+            prefs.extend([
+                ("dom.min_background_timeout_value", timeout.into()),
+                ("dom.min_background_timeout_value_without_budget_throttling", timeout.into()),
+                ("dom.timeout.enable_budget_timer_throttling", budget.into()),
+            ]);
             if let Net::Proxy { socks_port, loopback_only } = p.net {
                 prefs.push(("network.proxy.allow_hijacking_localhost", "true".into()));
                 prefs.push(("network.proxy.failover_direct", "false".into()));
@@ -600,6 +617,7 @@ mod tests {
         .unwrap();
         assert!(l.argv.contains(&"--proxy-bypass-list=*;<-loopback>".to_string()));
         assert!(l.argv.contains(&"--remote-debugging-port=0".to_string()));
+        assert!(l.argv.contains(&"--enable-features=CDPScreenshotNewSurface".to_string()));
         assert_eq!(l.argv.last().unwrap(), "http://localhost:5173");
     }
 }

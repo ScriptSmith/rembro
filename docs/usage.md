@@ -144,6 +144,8 @@ From inside the target, Playwright's `chromium.connectOverCDP('http://127.0.0.1:
 
 `--debug=PORT` asks for a particular port, and rembro stops with an error if that port is taken. `--debug` works with Chromium and Firefox only, and uses the `agent` profile unless you give `--profile`. When the browser runs here, the endpoint also listens on `[::1]`, for clients that resolve `localhost` to `::1`, and rembro refuses a profile that is already open in another window, since that browser can't be given a debugging port.
 
+With `--debug`, rembro starts Chromium with four flags that Playwright also passes when it starts Chromium: `--enable-features=CDPScreenshotNewSurface`, `--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding` and `--disable-background-timer-throttling`. Without them, Chromium throttles pages in background tabs and in covered or minimized windows, and screenshots of a minimized window time out, so a program driving the browser can fail while its window is out of sight. Firefox gets Playwright's prefs that stop it throttling timers in background tabs.
+
 Without `--remote`, the browser runs on this machine, so a program in the target that drives it can read your files. [Security](security.md#debugging) has the details.
 
 ## Running other programs
