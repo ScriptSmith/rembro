@@ -38,6 +38,8 @@ pub enum Call {
     ProbeHttp {
         ports: Vec<u16>,
     },
+    /// Whether nothing listens on 127.0.0.1:PORT and no other rembro session in the target
+    /// has reserved it. A free port stays reserved for this session.
     PortFree {
         port: u16,
     },

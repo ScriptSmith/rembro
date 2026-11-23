@@ -62,6 +62,7 @@ pub fn main(args: &[String]) -> ! {
         groups: Mutex::new(Vec::new()),
         dirs: Mutex::new(Vec::new()),
         files: Mutex::new(Vec::new()),
+        ports: Mutex::new(HashMap::new()),
         shim: Mutex::new(None),
         next_proc: AtomicU32::new(1),
         target_proxy: AtomicBool::new(false),
@@ -83,6 +84,8 @@ struct Agent {
     dirs: Mutex<Vec<PathBuf>>,
     /// Files to delete at exit, such as the URL socket.
     files: Mutex<Vec<PathBuf>>,
+    /// Debugging ports this session has reserved, by `Call::PortFree` or by listening on them.
+    ports: Mutex<HashMap<u16, Option<PortLock>>>,
     /// The directory with the BROWSER and xdg-open commands, once `Call::Shim` set them up.
     shim: Mutex<Option<PathBuf>>,
     next_proc: AtomicU32,
@@ -123,6 +126,26 @@ impl Agent {
         for f in self.files.lock().unwrap().iter() {
             let _ = fs::remove_file(f);
         }
+        self.ports.lock().unwrap().clear();
+    }
+
+    /// Whether no other rembro session here has reserved the port. If none has, it stays
+    /// reserved for this session until the agent exits, because a browser that is to listen
+    /// on it takes a while to start.
+    fn reserve_port(&self, port: u16) -> bool {
+        let mut ports = self.ports.lock().unwrap();
+        if ports.contains_key(&port) {
+            return true;
+        }
+        let path =
+            socket_dir(std::env::var("XDG_RUNTIME_DIR").ok().as_deref()).map(|d| d.join(format!("port-{port}.lock")));
+        let lock = match path.map(|p| (lock_file(&p), p)) {
+            Some((Ok(Some(file)), path)) => Some(PortLock { path, _lock: file }),
+            Some((Ok(None), _)) => return false,
+            _ => None,
+        };
+        ports.insert(port, lock);
+        true
     }
 
     fn home(&self) -> Option<String> {
@@ -231,7 +254,9 @@ impl Agent {
                 json!(ports)
             }
             Call::ProbeHttp { ports } => json!(probe_http(&ports)),
-            Call::PortFree { port } => json!(TcpListener::bind(("127.0.0.1", port)).is_ok()),
+            Call::PortFree { port } => {
+                json!(TcpListener::bind(("127.0.0.1", port)).is_ok() && self.reserve_port(port))
+            }
             Call::FreePort => {
                 let l = TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
                 json!(l.local_addr().map_err(|e| e.to_string())?.port())
@@ -321,8 +346,17 @@ impl Agent {
     fn listen(self: &Arc<Self>, mux: &Arc<Mux>, id: u32, addr: Addr) -> Result<u16, String> {
         match addr {
             Addr::Tcp { host, port } => {
-                let l = TcpListener::bind((host.as_str(), port))
-                    .map_err(|e| format!("cannot listen on {host}:{port}: {e}"))?;
+                let reserved = port == 0 || self.ports.lock().unwrap().contains_key(&port);
+                if !reserved && !self.reserve_port(port) {
+                    return Err(format!("cannot listen on {host}:{port}: another rembro session is about to use it"));
+                }
+                let l = TcpListener::bind((host.as_str(), port)).map_err(|e| {
+                    // Something other than rembro has it, and may let it go.
+                    if !reserved {
+                        self.ports.lock().unwrap().remove(&port);
+                    }
+                    format!("cannot listen on {host}:{port}: {e}")
+                })?;
                 let port = l.local_addr().map_err(|e| e.to_string())?.port();
                 let mux = mux.clone();
                 thread::spawn(move || {
@@ -587,6 +621,37 @@ fn extra_cas() -> Vec<(String, String)> {
         }
     }
     out
+}
+
+/// A lock on a debugging port's file, which goes when dropped.
+struct PortLock {
+    path: PathBuf,
+    _lock: File,
+}
+
+impl Drop for PortLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+/// Locks the file at `path`, creating it if needed, or returns None if another process
+/// holds it. A holder removes the file when it is done, so a lock taken on a file that was
+/// removed in the meantime is taken again on the new one.
+fn lock_file(path: &Path) -> io::Result<Option<File>> {
+    use std::os::unix::fs::MetadataExt;
+    loop {
+        let file = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+        let held = file.metadata()?;
+        if fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == (held.dev(), held.ino())) {
+            return Ok(Some(file));
+        }
+    }
 }
 
 /// A private per-user directory for the URL sockets: $XDG_RUNTIME_DIR/rembro, or
