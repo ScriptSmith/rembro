@@ -730,6 +730,21 @@ mod tests {
         })
     }
 
+    /// Windows opens a directory only with backup semantics, and changes its times only
+    /// through a handle that may write its attributes.
+    fn set_dir_modified(dir: &Path, time: SystemTime) -> io::Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_WRITE_ATTRIBUTES: u32 = 0x100;
+            const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+            options.access_mode(FILE_WRITE_ATTRIBUTES).custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        options.open(dir)?.set_modified(time)
+    }
+
     #[test]
     fn sessions() {
         let dir = util::mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
@@ -792,7 +807,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink("host-1", src.join("SingletonLock")).unwrap();
         let month_ago = SystemTime::now() - Duration::from_secs(30 * 86400);
-        File::open(&src).unwrap().set_modified(month_ago).unwrap();
+        set_dir_modified(&src, month_ago).unwrap();
 
         let fork = create_temp(&dir, Some(&src), "sbx:qut").unwrap();
         assert!(!fork.busy && fork.mark.is_some());
