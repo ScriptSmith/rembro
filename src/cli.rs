@@ -35,7 +35,8 @@ Examples:
   rembro --fork work ssh:bastion        start from a copy of them, deleted at exit
   rembro sbx:myapp -- --incognito       pass arguments to the browser
   rembro run ssh:devbox gimp            run any program there, with its window here
-  rembro install docker:web firefox     install a browser in the target for --remote";
+  rembro install docker:web firefox     install a browser in the target for --remote
+  rembro profiles --prune 30            delete profiles no session has used for 30 days";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -67,6 +68,8 @@ pub enum Command {
     Run(Run),
     /// Install a browser in the target, for --remote
     Install(Install),
+    /// List the browser profiles that rembro keeps on this machine, or delete old ones
+    Profiles(Profiles),
 }
 
 #[derive(Args, Debug)]
@@ -172,6 +175,14 @@ pub struct Run {
 
     #[command(flatten)]
     pub gui: GuiOpts,
+}
+
+#[derive(Args, Debug)]
+pub struct Profiles {
+    /// Delete the profiles that no session has used for DAYS days, and the temporary ones
+    /// that sessions which were killed left behind. Profiles that rembro did not create stay
+    #[arg(long, value_name = "DAYS")]
+    pub prune: Option<u64>,
 }
 
 #[derive(Args, Debug)]

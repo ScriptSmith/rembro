@@ -113,6 +113,12 @@ When the browser runs here, rembro refuses two uses of `--profile PATH` that wou
 
 Chromium is configured with command-line flags only, so rembro can use a regular Chromium profile that is closed without changing it. `--trust-target-ca` on a profile rembro did not create removes the target's CAs again when the browser exits. rembro marks the profiles it creates with a `rembro-profile` file, locks a `rembro-session.lock` file in them while a session uses them, and keeps its prefs in `user.js` between two marker comments. For other profiles, the lock file is in `rembro/locks` in rembro's data directory.
 
+### Listing and deleting profiles
+
+`rembro profiles` lists the profiles that rembro keeps on this machine, with their size and the day a session last used them. A Chromium profile that has been used for a while takes 150 to 200 MB.
+
+`rembro profiles --prune DAYS` deletes the profiles that no session has used for DAYS days, and the temporary profiles that sessions which were killed left behind. Forking a profile counts as using it. Pruning leaves profiles that are open, and profiles without the `rembro-profile` mark, such as one copied into rembro's directory by hand. It doesn't reach the profiles that `--remote` keeps in targets, which you can delete there.
+
 ## Opening pages
 
 With no URL, rembro looks for HTTP servers on the target's loopback. It takes the ports that are listening on a loopback or wildcard address, sends each one a `GET /`, and opens a tab at `http://localhost:PORT` for each one that answers with HTTP.
@@ -188,6 +194,7 @@ Sound plays here when `PULSE_SERVER` names a PulseAudio server on this machine, 
 rembro [OPTIONS] TARGET [URL]... [-- BROWSER_ARGS...]
 rembro run [OPTIONS] TARGET COMMAND [ARGS]...
 rembro install [OPTIONS] TARGET [BROWSER]
+rembro profiles [--prune DAYS]
 
 -b, --browser BROWSER     browser to use (default: auto; also REMBRO_BROWSER)
     --family FAMILY       chromium, firefox, epiphany, minibrowser or

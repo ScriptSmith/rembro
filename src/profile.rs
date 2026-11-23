@@ -1,16 +1,17 @@
 //! Browser profiles: temporary and kept ones, keeping rembro's changes out of profiles that
-//! it did not create, and telling its own running sessions apart from browsers started
-//! some other way.
+//! it did not create, telling its own running sessions apart from browsers started some
+//! other way, and `rembro profiles`.
 
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::browser::Family;
+use crate::cli::Profiles;
 use crate::{certs, sys, util};
 
 /// Present in profiles that rembro created.
@@ -22,6 +23,8 @@ const SESSION: &str = "rembro-session";
 const LOCK: &str = "rembro-session.lock";
 /// Settings of a Firefox profile that rembro did not create, to put back after a session.
 const RESTORE: &str = "rembro-restore.json";
+/// Made and removed in a profile when a session forks it.
+const FORKED: &str = "rembro-forked";
 /// The start of a temporary profile's directory name, in the system's temporary directory.
 const TEMP_PREFIX: &str = "rembro-profile-";
 /// The start of the name of a `RunDir`, in the system's temporary directory.
@@ -128,14 +131,28 @@ pub fn create_temp(base: &Path, fork: Option<&Path>, target: &str) -> Result<Cla
     }
     let path = util::mkdtemp(base, TEMP_PREFIX).map_err(|e| format!("mkdtemp: {e}"))?;
     mark_created(&path);
+    // Locked before the copy, so that `rembro profiles --prune` leaves it alone.
     let mark = SessionMark::claim(&path, target);
-    if let Some(src) = fork
-        && let Err(e) = copy_profile(src, &path)
-    {
-        let _ = fs::remove_dir_all(&path);
-        return Err(format!("cannot copy {}: {e}", src.display()));
+    if let Some(src) = fork {
+        if let Err(e) = copy_profile(src, &path) {
+            let _ = fs::remove_dir_all(&path);
+            return Err(format!("cannot copy {}: {e}", src.display()));
+        }
+        // Forking a profile is using it, as far as `rembro profiles --prune` is concerned.
+        if src.join(OWNER).exists() {
+            touch(src);
+        }
     }
     Ok(Claimed { path, busy: false, mark })
+}
+
+/// Changes the profile directory's time, which `rembro profiles` shows as its last use, as
+/// a session's mark does when it comes and goes.
+fn touch(profile: &Path) {
+    let file = profile.join(FORKED);
+    if fs::write(&file, "").is_ok() {
+        let _ = fs::remove_file(file);
+    }
 }
 
 /// Deletes a profile. It is moved aside first, so that a session that starts meanwhile
@@ -223,6 +240,7 @@ const NOT_COPIED: &[&str] = &[
     SESSION,
     LOCK,
     RESTORE,
+    FORKED,
     "DevToolsActivePort",
     "lockfile",
     "parent.lock",
@@ -469,6 +487,212 @@ pub fn kept_dir() -> PathBuf {
     util::data_dir().join("rembro/profiles")
 }
 
+/// A profile that `rembro profiles` lists.
+struct Found {
+    path: PathBuf,
+    /// TARGET/BROWSER/NAME, or a temporary profile's directory name.
+    name: String,
+    size: u64,
+    used: SystemTime,
+    open: bool,
+    /// rembro created it, so --prune may delete it.
+    ours: bool,
+}
+
+impl Found {
+    fn new(path: PathBuf, name: String) -> Found {
+        Found {
+            size: dir_size(&path),
+            used: last_used(&path),
+            open: open_now(&path),
+            ours: path.join(OWNER).exists(),
+            name,
+            path,
+        }
+    }
+
+    fn days(&self, now: SystemTime) -> u64 {
+        days_between(self.used, now)
+    }
+}
+
+/// When a session last used the profile. A session creates and removes its mark in the
+/// profile, and a fork does the same, so the directory's time is when one last came or went.
+fn last_used(profile: &Path) -> SystemTime {
+    fs::metadata(profile).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH)
+}
+
+fn days_between(then: SystemTime, now: SystemTime) -> u64 {
+    now.duration_since(then).map(|d| d.as_secs() / 86400).unwrap_or(0)
+}
+
+/// Whether a browser or a rembro session has the profile open, or for a `RunDir`, whether
+/// `rembro run` or a session with its profile is still running.
+fn open_now(path: &Path) -> bool {
+    is_open(path) || run_profile_open(&path.join(RUN_PROFILE))
+}
+
+/// Whether `dir` is a browser profile rather than a directory of them.
+fn is_profile(dir: &Path) -> bool {
+    [OWNER, "Local State", "prefs.js", "times.json"].iter().any(|f| dir.join(f).exists())
+}
+
+/// The directories in `dir`, leaving out those that `remove_profile` is deleting.
+fn subdirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.'))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+fn dir_size(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// The profiles kept in `dir`, and the temporary ones in `temp` that sessions which were
+/// killed left behind.
+fn find(dir: &Path, temp: &Path) -> (Vec<Found>, Vec<Found>) {
+    let mut kept = Vec::new();
+    let mut add = |profile: PathBuf| {
+        let name = profile.strip_prefix(dir).unwrap_or(&profile).to_string_lossy().into_owned();
+        kept.push(Found::new(profile, name));
+    };
+    for target in subdirs(dir) {
+        for browser in subdirs(&target) {
+            // --remote keeps profiles in BROWSER/NAME in the target, which can be this machine.
+            if is_profile(&browser) {
+                add(browser);
+                continue;
+            }
+            subdirs(&browser).into_iter().for_each(&mut add);
+        }
+    }
+    let left = subdirs(temp)
+        .into_iter()
+        .filter(|p| {
+            p.file_name().is_some_and(|n| {
+                let n = n.to_string_lossy();
+                n.starts_with(TEMP_PREFIX) || n.starts_with(RUN_PREFIX)
+            })
+        })
+        .map(|p| {
+            let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            Found::new(p, name)
+        })
+        .filter(|f| f.ours && !f.open)
+        .collect();
+    (kept, left)
+}
+
+fn size(bytes: u64) -> String {
+    let mut n = bytes as f64;
+    let mut unit = 0;
+    while n >= 1024.0 && unit < 4 {
+        n /= 1024.0;
+        unit += 1;
+    }
+    let suffix = ["B", "K", "M", "G", "T"][unit];
+    if unit > 0 && n < 10.0 { format!("{n:.1}{suffix}") } else { format!("{n:.0}{suffix}") }
+}
+
+fn ago(days: u64) -> String {
+    match days {
+        0 => "today".into(),
+        1 => "yesterday".into(),
+        n => format!("{n} days ago"),
+    }
+}
+
+/// Deletes the profiles in `kept` that rembro created and no session has used for `days`
+/// days, and the temporary ones in `left`. Returns those it removed.
+fn prune<'a>(dir: &Path, kept: &'a [Found], left: &'a [Found], days: u64, now: SystemTime) -> Vec<&'a Found> {
+    let mut removed = Vec::new();
+    let kept = kept.iter().filter(|f| f.ours && !f.open && f.days(now) >= days).map(|f| (f, true));
+    for (f, is_kept) in kept.chain(left.iter().map(|f| (f, false))) {
+        // Checked again, since a session may have used it after `find` looked.
+        if open_now(&f.path) || (is_kept && days_between(last_used(&f.path), now) < days) {
+            continue;
+        }
+        // Locked first, so that no session starts with it while it goes.
+        let Some(_mark) = SessionMark::claim(&f.path, "rembro profiles") else { continue };
+        if is_open_by_browser(&f.path) || run_profile_open(&f.path.join(RUN_PROFILE)) {
+            continue;
+        }
+        match remove_profile(&f.path) {
+            Ok(()) => removed.push(f),
+            Err(e) => eprintln!("rembro: cannot remove {}: {e}", f.path.display()),
+        }
+    }
+    // The TARGET and BROWSER directories that are left empty.
+    for target in subdirs(dir) {
+        for browser in subdirs(&target) {
+            let _ = fs::remove_dir(browser);
+        }
+        let _ = fs::remove_dir(target);
+    }
+    removed
+}
+
+/// `rembro profiles`: lists the profiles rembro keeps on this machine, or with --prune,
+/// deletes those that no session has used for that many days.
+pub fn command(p: &Profiles) -> Result<i32, String> {
+    let dir = kept_dir();
+    let temp = std::env::temp_dir();
+    let (kept, left) = find(&dir, &temp);
+    let now = SystemTime::now();
+    let Some(days) = p.prune else {
+        let row = |f: &Found, note: &str| println!("{:>6}  {:<12}  {}{note}", size(f.size), ago(f.days(now)), f.name);
+        if kept.is_empty() {
+            println!("No profiles in {}", dir.display());
+        } else {
+            println!("Profiles in {}:", dir.display());
+        }
+        for f in &kept {
+            row(
+                f,
+                match (f.open, f.ours) {
+                    (true, _) => "  (open)",
+                    (false, false) => "  (no rembro-profile mark, so --prune keeps it)",
+                    (false, true) => "",
+                },
+            );
+        }
+        if !left.is_empty() {
+            println!("Temporary profiles left in {} by sessions that were killed:", temp.display());
+        }
+        for f in &left {
+            row(f, "");
+        }
+        return Ok(0);
+    };
+    let removed = prune(&dir, &kept, &left, days, now);
+    for f in &removed {
+        println!("Removed {} ({}, last used {})", f.name, size(f.size), ago(f.days(now)));
+    }
+    let freed = size(removed.iter().map(|f| f.size).sum());
+    match removed.len() {
+        0 if days == 1 => println!("No profile has gone unused for a day"),
+        0 => println!("No profile has gone unused for {days} days"),
+        1 => println!("Freed {freed}"),
+        n => println!("Removed {n} profiles and freed {freed}"),
+    }
+    Ok(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,6 +791,8 @@ mod tests {
         fs::write(src.join("DevToolsActivePort"), "9222\n").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("host-1", src.join("SingletonLock")).unwrap();
+        let month_ago = SystemTime::now() - Duration::from_secs(30 * 86400);
+        File::open(&src).unwrap().set_modified(month_ago).unwrap();
 
         let fork = create_temp(&dir, Some(&src), "sbx:qut").unwrap();
         assert!(!fork.busy && fork.mark.is_some());
@@ -581,6 +807,8 @@ mod tests {
         assert_eq!(prefs["profile"]["name"], "Me");
         // The fork is a session of its own, so the source being open does not make it busy.
         assert!(is_open(&fork.path));
+        // Forking counts as using the source.
+        assert_eq!(days_between(last_used(&src), SystemTime::now()), 0);
         assert!(create_temp(&dir, Some(&dir.join("missing")), "sbx:qut").is_err());
         drop(open);
         fs::remove_dir_all(dir).unwrap();
@@ -614,5 +842,70 @@ mod tests {
         assert!(!profile.exists() && dir.exists());
         drop(run);
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn pruning() {
+        let root = util::mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
+        let (dir, temp) = (root.join("profiles"), root.join("tmp"));
+        fs::create_dir_all(&temp).unwrap();
+        let profile = |name: &str| {
+            let p = dir.join(name);
+            fs::create_dir_all(&p).unwrap();
+            fs::write(p.join("Local State"), "{}").unwrap();
+            mark_created(&p);
+            p
+        };
+        let old = profile("sbx-old/chromium/default");
+        let _new = profile("sbx-qut/chromium/default");
+        let open = profile("sbx-qut/chromium/work");
+        let _session = SessionMark::claim(&open, "sbx:qut").unwrap();
+        let copied = dir.join("sbx-qut/firefox/default");
+        fs::create_dir_all(copied.join("Default")).unwrap();
+        let remote = profile("chromium/default");
+        fs::create_dir_all(remote.join("Default")).unwrap();
+        // A --remote profile from rembro 0.2, which had no mark.
+        let unmarked = dir.join("firefox/default");
+        fs::create_dir_all(unmarked.join("storage")).unwrap();
+        fs::write(unmarked.join("prefs.js"), "").unwrap();
+        fs::create_dir_all(dir.join("sbx-qut/chromium/.gone.rembro-deleting-1")).unwrap();
+        let left = create_temp(&temp, None, "sbx:qut").unwrap();
+        let left_path = left.path.clone();
+        drop(left);
+        let running = create_temp(&temp, None, "sbx:qut").unwrap();
+        // A `rembro run` that is still going, and one that was killed.
+        let run_dir = |held: bool| {
+            let d = util::mkdtemp(&temp, RUN_PREFIX).unwrap();
+            mark_created(&d);
+            let mark = SessionMark::claim(&d, "rembro run").unwrap();
+            fs::create_dir(d.join(RUN_PROFILE)).unwrap();
+            mark_created(&d.join(RUN_PROFILE));
+            (d, held.then_some(mark))
+        };
+        let (live_run, _live) = run_dir(true);
+        let (dead_run, _) = run_dir(false);
+
+        let (kept, left) = find(&dir, &temp);
+        let names: Vec<&str> = kept.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names.len(), 6, "{names:?}");
+        assert!(kept.iter().any(|f| f.path == remote));
+        assert!(kept.iter().any(|f| f.path == unmarked && !f.ours));
+        assert!(kept.iter().any(|f| f.path == copied && !f.ours));
+        assert!(kept.iter().any(|f| f.path == open && f.open));
+        let mut left_paths: Vec<PathBuf> = left.iter().map(|f| f.path.clone()).collect();
+        left_paths.sort();
+        let mut expected = vec![left_path.clone(), dead_run.clone()];
+        expected.sort();
+        assert_eq!(left_paths, expected);
+
+        // As if a month has gone by: all but the open and the unmarked profiles go.
+        let later = SystemTime::now() + Duration::from_secs(30 * 86400);
+        let removed: Vec<PathBuf> = prune(&dir, &kept, &left, 30, later).iter().map(|f| f.path.clone()).collect();
+        assert_eq!(removed.len(), 5, "{removed:?}");
+        assert!(!old.exists() && !dir.join("sbx-old").exists() && !remote.exists());
+        assert!(open.exists() && copied.exists() && unmarked.exists() && running.path.exists());
+        assert!(!left_path.exists() && !dead_run.exists() && live_run.exists());
+        drop(running);
+        fs::remove_dir_all(root).unwrap();
     }
 }

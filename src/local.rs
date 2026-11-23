@@ -65,7 +65,10 @@ fn profile_dir(
         ProfileArg::Fork(p) => {
             let src = path_of(&p);
             if !util::is_path(&p) && !src.is_dir() {
-                return Err(format!("there is no {p} profile for {} in {}", s.label, browser.name));
+                return Err(format!(
+                    "there is no {p} profile for {} in {}; `rembro profiles` lists the profiles there are",
+                    s.label, browser.name
+                ));
             }
             let open = profile::is_open(&src);
             if open {

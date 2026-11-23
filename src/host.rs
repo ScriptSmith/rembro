@@ -21,7 +21,7 @@ use crate::mux::{Handler, Mux, Sock};
 use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL};
 use crate::target::Target;
 use crate::util::PortSpec;
-use crate::{attach, install, local, remote, run};
+use crate::{attach, install, local, profile, remote, run};
 use crate::{sys, util, x11};
 
 pub const DEBUG_ID: u32 = 1;
@@ -301,6 +301,7 @@ pub fn run(cli: Cli) -> Result<i32, String> {
             s.close();
             result
         }
+        Some(Command::Profiles(p)) => profile::command(p),
         None => {
             let b = &cli.browse;
             let target = b.target.as_deref().unwrap_or_default();
