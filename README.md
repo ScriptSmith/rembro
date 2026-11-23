@@ -17,6 +17,7 @@ rembro ssh:bastion,ssh:box,docker:web            # a container on a host behind 
 rembro --remote ssh:devbox                       # run the browser on devbox, show its window here
 rembro --debug sbx:myapp                         # let an AI agent in the sandbox drive the browser
 rembro --debug --headless sbx:myapp              # the same, with no browser window
+rembro --profile work ssh:bastion                # keep this browser's logins for next time
 rembro run ssh:devbox gimp                       # any GUI program, window shown here
 rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
 ```
@@ -41,7 +42,7 @@ Too big or complicated for your liking? Get most of the functionality with a 100
 
 ## Where the browser runs
 
-- On this machine, by default. rembro points the browser at a SOCKS5 proxy on this machine's loopback, and the target makes every connection for it, DNS lookups included. You keep your own browser, fonts, GPU and window manager, with a separate profile for each target.
+- On this machine, by default. rembro points the browser at a SOCKS5 proxy on this machine's loopback, and the target makes every connection for it, DNS lookups included. You keep your own browser, fonts, GPU and window manager, with a profile of its own for each session.
 - In the target, with `--remote`. Its window comes to this desktop through [waypipe](https://gitlab.freedesktop.org/mstoeckl/waypipe) on Wayland or through a forwarded X11 connection, and its sound plays here.
 
 ## Targets
@@ -63,7 +64,7 @@ Too big or complicated for your liking? Get most of the functionality with a 100
 
 Start a dev server in the target and run `rembro TARGET`. With no URL, rembro opens a tab for each HTTP server listening on the target's loopback, and more tabs as new servers start. Give URLs to open particular pages instead.
 
-rembro picks the first browser it finds, starting with Chromium and its forks and then Firefox. Use `-b firefox` (or set `REMBRO_BROWSER`) to choose. It never uses your regular browser profile unless you ask: each target gets its own profile.
+rembro picks the first browser it finds, starting with Chromium and its forks and then Firefox. Use `-b firefox` (or set `REMBRO_BROWSER`) to choose. It never uses your regular browser profile unless you ask: each session gets a new profile that is deleted when the browser exits, `--profile NAME` keeps one for next time, and `--fork NAME` starts from a copy of one ([details](docs/usage.md#profiles)).
 
 For `--remote`, the target needs a browser of its own. `rembro install TARGET` installs Chromium there, and `rembro install TARGET firefox` installs Firefox.
 

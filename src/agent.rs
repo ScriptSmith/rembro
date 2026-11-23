@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::mux::{Handler, Mux, Sock};
-use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL};
-use crate::{sys, util};
+use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL, ProfileSpec};
+use crate::{profile, sys, util};
 
 pub fn self_hash() -> io::Result<String> {
     Ok(format!("{:016x}", util::fnv64(&fs::read("/proc/self/exe")?)))
@@ -62,6 +62,7 @@ pub fn main(args: &[String]) -> ! {
         groups: Mutex::new(Vec::new()),
         dirs: Mutex::new(Vec::new()),
         files: Mutex::new(Vec::new()),
+        marks: Mutex::new(Vec::new()),
         ports: Mutex::new(HashMap::new()),
         shim: Mutex::new(None),
         next_proc: AtomicU32::new(1),
@@ -84,6 +85,8 @@ struct Agent {
     dirs: Mutex<Vec<PathBuf>>,
     /// Files to delete at exit, such as the URL socket.
     files: Mutex<Vec<PathBuf>>,
+    /// Browser profiles this session has open.
+    marks: Mutex<Vec<profile::SessionMark>>,
     /// Debugging ports this session has reserved, by `Call::PortFree` or by listening on them.
     ports: Mutex<HashMap<u16, Option<PortLock>>>,
     /// The directory with the BROWSER and xdg-open commands, once `Call::Shim` set them up.
@@ -126,6 +129,7 @@ impl Agent {
         for f in self.files.lock().unwrap().iter() {
             let _ = fs::remove_file(f);
         }
+        self.marks.lock().unwrap().clear();
         self.ports.lock().unwrap().clear();
     }
 
@@ -139,7 +143,8 @@ impl Agent {
         }
         let path =
             socket_dir(std::env::var("XDG_RUNTIME_DIR").ok().as_deref()).map(|d| d.join(format!("port-{port}.lock")));
-        let lock = match path.map(|p| (lock_file(&p), p)) {
+        // A holder removes the file when it is done.
+        let lock = match path.map(|p| (util::lock_file(&p), p)) {
             Some((Ok(Some(file)), path)) => Some(PortLock { path, _lock: file }),
             Some((Ok(None), _)) => return false,
             _ => None,
@@ -217,11 +222,6 @@ impl Agent {
                 self.dirs.lock().unwrap().push(dir.clone());
                 json!(dir.to_string_lossy())
             }
-            Call::Mkdir { path } => {
-                let path = self.path(&path)?;
-                fs::create_dir_all(&path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
-                json!(path.to_string_lossy())
-            }
             Call::ReadFile { path } => match fs::read(self.path(&path)?) {
                 Ok(data) => json!(data),
                 Err(e) if e.kind() == io::ErrorKind::NotFound => Value::Null,
@@ -285,6 +285,19 @@ impl Agent {
             Call::Shim => json!(self.shim(mux)?.to_string_lossy()),
             Call::ExtraCas => json!(extra_cas()),
             Call::Capture { argv, timeout_ms } => json!(capture(&argv, Duration::from_millis(timeout_ms))?),
+            Call::Profile { profile, family, target } => {
+                let claimed = match profile {
+                    ProfileSpec::Kept { path } => profile::claim(&self.path(&path)?, family, &target)?,
+                    ProfileSpec::Temp { fork } => {
+                        let fork = fork.map(|f| self.path(&f)).transpose()?;
+                        let claimed = profile::create_temp(&std::env::temp_dir(), fork.as_deref(), &target)?;
+                        self.dirs.lock().unwrap().push(claimed.path.clone());
+                        claimed
+                    }
+                };
+                self.marks.lock().unwrap().extend(claimed.mark);
+                json!((claimed.path.to_string_lossy(), claimed.busy))
+            }
         })
     }
 
@@ -632,25 +645,6 @@ struct PortLock {
 impl Drop for PortLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
-    }
-}
-
-/// Locks the file at `path`, creating it if needed, or returns None if another process
-/// holds it. A holder removes the file when it is done, so a lock taken on a file that was
-/// removed in the meantime is taken again on the new one.
-fn lock_file(path: &Path) -> io::Result<Option<File>> {
-    use std::os::unix::fs::MetadataExt;
-    loop {
-        let file = OpenOptions::new().write(true).create(true).truncate(false).open(path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(fs::TryLockError::WouldBlock) => return Ok(None),
-            Err(fs::TryLockError::Error(e)) => return Err(e),
-        }
-        let held = file.metadata()?;
-        if fs::metadata(path).is_ok_and(|m| (m.dev(), m.ino()) == (held.dev(), held.ino())) {
-            return Ok(Some(file));
-        }
     }
 }
 

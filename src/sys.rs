@@ -131,6 +131,23 @@ mod imp {
         let Ok(p) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return false };
         unsafe { libc::access(p.as_ptr(), libc::W_OK) == 0 }
     }
+
+    /// Creates a directory that only this user can open, unless it exists.
+    pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::DirBuilderExt;
+        match fs::DirBuilder::new().mode(0o700).create(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+            r => r,
+        }
+    }
+
+    /// Whether `path` is a directory, not a link to one, that this user owns and only this
+    /// user can open.
+    pub fn is_private_dir(path: &Path) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        fs::symlink_metadata(path)
+            .is_ok_and(|m| m.is_dir() && m.uid() == unsafe { libc::getuid() } && m.mode() & 0o077 == 0)
+    }
 }
 
 #[cfg(windows)]
@@ -219,6 +236,18 @@ mod imp {
     }
 
     pub fn set_mode(_path: &Path, _mode: u32) {}
+
+    pub fn create_private_dir(path: &Path) -> std::io::Result<()> {
+        match fs::create_dir(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_dir() => Ok(()),
+            r => r,
+        }
+    }
+
+    /// Whether `path` is a directory. The system's temporary directory is the user's own.
+    pub fn is_private_dir(path: &Path) -> bool {
+        fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+    }
 
     pub fn is_executable(m: &fs::Metadata) -> bool {
         m.is_file()

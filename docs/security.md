@@ -12,7 +12,7 @@ In a chain of targets, the session passes through every target before the last, 
 
 rembro answers no requests from the agent. The agent sends rembro program output, exit statuses and URLs to open, and it can open connections back to this machine only to the endpoints the session set up: the debugging endpoint, the waypipe socket, the X11 display and the sound server.
 
-rembro keeps a separate profile for each target, and a browser started with `--debug` uses its own `agent` profile, so a program that drives it doesn't get the cookies of the browser you use. [Profiles](usage.md#profiles) has the details.
+Each session gets a new profile unless you name one, and `REMBRO_PROFILE` doesn't apply with `--debug`, so a program that drives the browser gets the cookies of a profile you use only when you pass that profile with `--profile` or `--fork`. Named profiles are kept for each target separately. [Profiles](usage.md#profiles) has the details.
 
 ## Debugging
 

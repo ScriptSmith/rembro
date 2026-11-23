@@ -11,11 +11,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::browser::{self, Edit, Family, Gui, Net, Plan, Resolved};
-use crate::cli::{Browse, DisplayArg, GuiOpts};
+use crate::cli::{Browse, DisplayArg, GuiOpts, ProfileArg};
 use crate::host::{self, Conn, Endpoint, HostEvent, Limiter, PULSE_ID, Session, WAYLAND_ID, X11_ID};
 use crate::local::TempDir;
 use crate::mux::Sock;
-use crate::proto::{Addr, Call, Event, Open};
+use crate::proto::{Addr, Call, Event, Open, ProfileSpec};
 use crate::target::Target;
 use crate::util::{self, PortSpec};
 use crate::{fetch, sys, x11};
@@ -303,19 +303,28 @@ pub fn setup_gui(s: &Session, opts: &GuiOpts, dir: &str, required: bool) -> Resu
     Ok(g)
 }
 
-fn profile_dir(b: &Browse, s: &Session, browser: &str, dir: &str) -> Result<String, String> {
-    let path = if b.temp_profile {
-        format!("{dir}/profile")
-    } else {
-        match &b.profile {
-            Some(p) if p.contains('/') || p == "~" => p.clone(),
-            p => {
-                let profile = p.as_deref().unwrap_or(if b.debug.is_some() { "agent" } else { "default" });
-                format!("~/.local/share/rembro/profiles/{browser}/{}", util::slug(profile))
-            }
+/// The profile in the target, and whether a browser there already has it open.
+fn profile_dir(b: &Browse, s: &Session, browser: &Resolved) -> Result<(String, bool), String> {
+    let path_of = |p: &str| {
+        if p.contains('/') || p == "~" {
+            p.to_string()
+        } else {
+            format!("~/.local/share/rembro/profiles/{}/{}", browser.name, util::slug(p))
         }
     };
-    s.call(&Call::Mkdir { path })
+    let profile = match b.profile_arg() {
+        ProfileArg::Kept(p) => ProfileSpec::Kept { path: path_of(&p) },
+        ProfileArg::Temp => ProfileSpec::Temp { fork: None },
+        ProfileArg::Fork(p) => ProfileSpec::Temp { fork: Some(path_of(&p)) },
+    };
+    s.call(&Call::Profile { profile, family: browser.family, target: s.label.clone() })
+}
+
+/// The debugging port in the DevToolsActivePort file of the Chromium that has `profile` open
+/// in the target.
+fn devtools_port(s: &Session, profile: &str) -> Option<u16> {
+    let data: Option<Vec<u8>> = s.call(&Call::ReadFile { path: format!("{profile}/DevToolsActivePort") }).ok()?;
+    String::from_utf8_lossy(&data?).lines().next()?.trim().parse().ok()
 }
 
 /// Opens a page in the Chromium listening for CDP on `port` in the target.
@@ -372,7 +381,18 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     let started = Instant::now();
     s.call::<String>(&Call::Shim)?;
 
-    let profile = profile_dir(b, s, &browser.name, &dir)?;
+    let (profile, busy) = profile_dir(b, s, &browser)?;
+    let temporary = !matches!(b.profile_arg(), ProfileArg::Kept(_));
+    if busy && debug.is_some() {
+        return Err(format!(
+            "{profile} is already open in another window in {}, which cannot be given a debugging port; close it, \
+             or use --fork instead of --profile to start from a copy of it",
+            s.label
+        ));
+    }
+    if busy {
+        eprintln!("rembro: {profile} is open in another window in {}, so the pages open there", s.label);
+    }
     let mut exclude = gui.exclude.clone();
     let mut debug_port = None;
     if let Some(requested) = debug {
@@ -389,10 +409,25 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     }
     let mut urls = b.urls.clone();
     let mut seen = None;
-    if urls.is_empty() {
+    if urls.is_empty() && !busy {
         let listening;
         (urls, listening) = host::server_urls(s, ports, &exclude)?;
         seen = Some(listening);
+    }
+    // A Chromium with a debugging endpoint takes the pages through it, which is the only way
+    // headless Chromium takes them. Other browsers get them from a second launch, below.
+    if busy
+        && browser.family == Family::Chromium
+        && let Some(first) = urls.first()
+        && let Some(port) = devtools_port(s, &profile)
+        && new_tab(&s.conn, port, first).is_ok()
+    {
+        for url in &urls[1..] {
+            if let Err(e) = new_tab(&s.conn, port, url) {
+                eprintln!("rembro: could not open {url}: {e}");
+            }
+        }
+        return Ok(0);
     }
     if let Some(port) = debug_port
         && let Some(page) = host::announce_debug(s, browser.family, port)
@@ -413,7 +448,8 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             extra: if first { &b.browser_args } else { &[] },
             root: s.info.uid == 0,
             small_shm: s.info.shm_bytes.is_some_and(|b| b < 1 << 30),
-            new_instance: first,
+            new_instance: first && !busy,
+            temporary,
             verbose: s.verbose,
         })
     };
@@ -421,7 +457,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if s.info.uid == 0 && browser.family == Family::Chromium {
         eprintln!("rembro: {} runs this as root, so Chromium's sandbox is off", s.label);
     }
-    for (path, edit) in launch.files {
+    // A browser that already has the profile open reads none of these files.
+    let files = if busy { Vec::new() } else { launch.files };
+    for (path, edit) in files {
         let data = match edit {
             Edit::Replace(d) => d,
             Edit::Block(block) => {

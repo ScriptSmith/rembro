@@ -31,6 +31,8 @@ Examples:
   rembro --remote ssh:devbox            run Chromium on devbox and show its window here
   rembro --debug sbx:myapp              let an agent in the sandbox drive the browser
   rembro --debug --headless sbx:myapp   the same, with no browser window
+  rembro --profile work ssh:bastion     keep this browser's logins for next time
+  rembro --fork work ssh:bastion        start from a copy of them, deleted at exit
   rembro sbx:myapp -- --incognito       pass arguments to the browser
   rembro run ssh:devbox gimp            run any program there, with its window here
   rembro install docker:web firefox     install a browser in the target for --remote";
@@ -108,12 +110,19 @@ pub struct Browse {
     #[arg(long, conflicts_with = "remote")]
     pub trust_target_ca: bool,
 
-    /// Profile name, or a path to a profile directory
-    #[arg(long, value_name = "NAME|PATH")]
+    /// Keep the browser's cookies and other data in a profile with this name, or in the
+    /// directory at PATH. Without it (or REMBRO_PROFILE), each session gets a new profile
+    /// that is deleted when the browser exits
+    #[arg(long, value_name = "NAME|PATH", conflicts_with_all = ["fork", "temp_profile"])]
     pub profile: Option<String>,
 
-    /// Use a new profile that is deleted when the browser exits
-    #[arg(long, conflicts_with = "profile")]
+    /// Start from a copy of this profile, deleted when the browser exits. NAME and PATH are
+    /// as for --profile
+    #[arg(long, value_name = "NAME|PATH", conflicts_with = "temp_profile")]
+    pub fork: Option<String>,
+
+    /// Use a new profile that is deleted when the browser exits, even when REMBRO_PROFILE is set
+    #[arg(long)]
     pub temp_profile: bool,
 
     /// Use the profile even where rembro would refuse: when a browser that rembro did not
@@ -124,8 +133,8 @@ pub struct Browse {
 
     /// Let programs in the target drive the browser: expose its debugging endpoint
     /// (CDP for Chromium, WebDriver BiDi for Firefox) on the target's 127.0.0.1:PORT.
-    /// The default port is 9222, or a free one if that is taken. Uses the "agent" profile
-    /// unless --profile is given
+    /// The default port is 9222, or a free one if that is taken. REMBRO_PROFILE does not
+    /// apply, so the browser gets a new profile unless --profile or --fork is given
     #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = "auto")]
     pub debug: Option<String>,
 
@@ -219,7 +228,37 @@ pub enum DisplayArg {
     None,
 }
 
+/// The profile a session uses.
+#[derive(Debug, PartialEq)]
+pub enum ProfileArg {
+    /// A new one, deleted when the session ends.
+    Temp,
+    /// A new one that starts as a copy of this one, and is deleted when the session ends.
+    Fork(String),
+    /// This one, kept between sessions.
+    Kept(String),
+}
+
 impl Browse {
+    /// The profile from --profile, --fork, --temp-profile or REMBRO_PROFILE. A browser that a
+    /// program drives with --debug never gets REMBRO_PROFILE's cookies.
+    pub fn profile_arg(&self) -> ProfileArg {
+        self.profile_from(std::env::var("REMBRO_PROFILE").ok())
+    }
+
+    fn profile_from(&self, env: Option<String>) -> ProfileArg {
+        if let Some(p) = &self.profile {
+            return ProfileArg::Kept(p.clone());
+        }
+        if let Some(p) = &self.fork {
+            return ProfileArg::Fork(p.clone());
+        }
+        match env {
+            Some(p) if !p.is_empty() && !self.temp_profile && self.debug.is_none() => ProfileArg::Kept(p),
+            _ => ProfileArg::Temp,
+        }
+    }
+
     /// The requested debugging port: None for no debugging, Some(None) for the default.
     pub fn debug_port(&self) -> Result<Option<Option<u16>>, String> {
         match self.debug.as_deref() {
@@ -234,5 +273,32 @@ impl Browse {
 
     pub fn watching(&self) -> bool {
         self.watch || (self.urls.is_empty() && !self.no_watch)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    fn profile(args: &[&str], env: Option<&str>) -> Result<ProfileArg, clap::Error> {
+        let cli = Cli::try_parse_from(["rembro"].iter().chain(args).chain(&["sbx:qut"]))?;
+        Ok(cli.browse.profile_from(env.map(String::from)))
+    }
+
+    #[test]
+    fn profiles() {
+        let kept = |p: &str| ProfileArg::Kept(p.into());
+        assert_eq!(profile(&[], None).unwrap(), ProfileArg::Temp);
+        assert_eq!(profile(&[], Some("")).unwrap(), ProfileArg::Temp);
+        assert_eq!(profile(&[], Some("work")).unwrap(), kept("work"));
+        assert_eq!(profile(&["--profile", "home"], Some("work")).unwrap(), kept("home"));
+        assert_eq!(profile(&["--fork", "home"], Some("work")).unwrap(), ProfileArg::Fork("home".into()));
+        assert_eq!(profile(&["--temp-profile"], Some("work")).unwrap(), ProfileArg::Temp);
+        // A browser that a program drives doesn't get REMBRO_PROFILE's cookies unasked.
+        assert_eq!(profile(&["--debug"], Some("work")).unwrap(), ProfileArg::Temp);
+        assert_eq!(profile(&["--debug", "--profile", "work"], None).unwrap(), kept("work"));
+        assert!(profile(&["--profile", "a", "--fork", "b"], None).is_err());
+        assert!(profile(&["--fork", "a", "--temp-profile"], None).is_err());
     }
 }

@@ -4,10 +4,12 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 
 use crate::util;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum Family {
     /// Chromium, Chrome, Brave, Edge, Vivaldi and other Chromium builds
     Chromium,
@@ -315,6 +317,8 @@ pub struct Plan<'a> {
     pub small_shm: bool,
     /// Start a new process rather than handing the pages to one already running.
     pub new_instance: bool,
+    /// The profile is deleted when the session ends.
+    pub temporary: bool,
     pub verbose: bool,
 }
 
@@ -400,6 +404,11 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                 "--no-first-run".into(),
                 "--no-default-browser-check".into(),
             ]);
+            if p.temporary {
+                // Chromium would otherwise download over 100 MB of components, such as
+                // Widevine, into each new profile.
+                l.argv.push("--disable-component-update".into());
+            }
             if let Net::Proxy { socks_port, loopback_only } = p.net {
                 l.argv.push(format!("--proxy-server=socks5://127.0.0.1:{socks_port}"));
                 // Later rules win: <-loopback> sends loopback to the proxy, and * sends the rest direct.
@@ -650,6 +659,7 @@ mod tests {
             root: false,
             small_shm: false,
             new_instance: true,
+            temporary: false,
             verbose: false,
         })
         .unwrap();
@@ -671,6 +681,7 @@ mod tests {
             root: false,
             small_shm: false,
             new_instance: true,
+            temporary: false,
             verbose: false,
         })
         .unwrap();

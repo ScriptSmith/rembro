@@ -443,6 +443,42 @@ pub fn cache_dir() -> PathBuf {
     base_dir("XDG_CACHE_HOME", ".cache", "Library/Caches")
 }
 
+/// Locks the file at `path`, creating it if needed, or returns None if another process holds
+/// it. A file that was removed or moved away while this took the lock is locked again at
+/// `path`, so the lock always belongs to the file there.
+pub fn lock_file(path: &Path) -> io::Result<Option<fs::File>> {
+    loop {
+        // A copied profile can bring a read-only lock file, which still takes a lock.
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .or_else(|e| fs::File::open(path).map_err(|_| e))?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+        if same_file(&file, path) {
+            return Ok(Some(file));
+        }
+    }
+}
+
+#[cfg(unix)]
+fn same_file(file: &fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(a), Ok(b)) = (file.metadata(), fs::metadata(path)) else { return false };
+    (a.dev(), a.ino()) == (b.dev(), b.ino())
+}
+
+/// Windows has no stable way to compare an open file with a path, so the lock stands as taken.
+#[cfg(windows)]
+fn same_file(_file: &fs::File, _path: &Path) -> bool {
+    true
+}
+
 /// Creates a new directory, private to this user, named `prefix` and six random characters.
 pub fn mkdtemp(base: &Path, prefix: &str) -> io::Result<PathBuf> {
     use std::hash::{BuildHasher, Hasher};

@@ -92,22 +92,26 @@ Arguments after `--` go to the browser: `rembro sbx:myapp -- --incognito`.
 
 ## Profiles
 
-rembro never uses your regular browser profile unless you ask it to. Profiles live in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-myapp`. On macOS they live in `~/Library/Application Support/rembro/profiles`, and on Windows in `%LOCALAPPDATA%\rembro\profiles`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. The name is `default`, or `agent` with `--debug`, so a browser that a program can drive never shares cookies with the one you use.
+rembro never uses your regular browser profile unless you ask it to. Each session gets a new profile, deleted when the browser exits, so every browser starts with no cookies, logins or history, and two sessions never share them. To keep a browser's logins for next time, give its profile a name:
 
-- `--profile NAME` picks another name.
-- `--profile PATH` uses any directory. rembro treats a value as a path when it contains `/` (or on Windows, `\`) or is `~`.
-- `--temp-profile` uses a new profile that is deleted when the browser exits. It can't be combined with `--profile`.
+- `--profile NAME` keeps the profile, and the next session with the same name, target and browser gets it back. `REMBRO_PROFILE=NAME` does the same for every session without `--debug`, and `--temp-profile` gives one session a new profile anyway.
+- `--profile PATH` uses any directory as the profile. rembro treats a value as a path when it contains `/` (or on Windows, `\`) or is `~`.
+- `--fork NAME` or `--fork PATH` starts from a copy of a profile, and deletes the copy when the browser exits. Log in once with `--profile work`, then run as many `--fork work` sessions as you like, at the same time, without changing `work`. The copy leaves out caches and the profile's locks. A fork of a profile that is open in another window has what that browser last saved to disk.
 
-To start from your regular logins without touching them, copy your regular profile into rembro's directory, for example `cp -r ~/.config/chromium ~/.local/share/rembro/profiles/sbx-myapp/chromium/default`.
+rembro keeps named profiles in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-myapp`. On macOS they live in `~/Library/Application Support/rembro/profiles`, and on Windows in `%LOCALAPPDATA%\rembro\profiles`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. Temporary profiles are `rembro-profile-XXXXXX` directories in the system's temporary directory, here or in the target. The links that a program under `rembro run` opens share one, in a private `rembro-run-XXXXXX` directory there. rembro 0.2 and earlier kept every session's data in a profile named `default`, or `agent` with `--debug`, and `--profile default` and `--profile agent` still open those.
 
-When the browser runs here and the profile is already open in another rembro window for the same target, the URLs open in that window.
+Chromium downloads over 100 MB of optional components into a profile, such as the Widevine DRM module and certificate revocation lists. rembro starts it with `--disable-component-update` in temporary profiles, so that it doesn't download them again for each session.
+
+To start from your regular logins without touching them, fork your regular profile, for example `rembro --fork ~/.config/chromium sbx:myapp`.
+
+When a profile you chose with `--profile` is already open in another rembro window for the same target, the URLs open in that window, and the new rembro exits. A Chromium with a debugging endpoint gets them through it, which is the only way a headless one takes them. When the other rembro is still starting its browser, the new one waits up to 30 seconds for it.
 
 When the browser runs here, rembro refuses two uses of `--profile PATH` that would go wrong, unless you add `--force-profile`:
 
 - The profile is open in a browser that rembro did not start, or in a rembro session for another target. The browser would hand the pages to that window, which uses a different network. With `--force-profile`, the pages open there anyway.
 - The profile is a Firefox profile that rembro did not create. rembro configures Firefox through prefs in `user.js`, which Firefox copies into `prefs.js`, so Firefox started on its own afterwards would use a proxy that no longer exists. With `--force-profile`, rembro saves the profile's `user.js` and the prefs it changes, and puts them back when the browser exits. If rembro is killed first, the next rembro launch with that profile puts them back.
 
-Chromium is configured with command-line flags only, so rembro can use a regular Chromium profile that is closed without changing it. `--trust-target-ca` on a profile rembro did not create removes the target's CAs again when the browser exits. rembro marks the profiles it creates with a `rembro-profile` file, and keeps its prefs in `user.js` between two marker comments.
+Chromium is configured with command-line flags only, so rembro can use a regular Chromium profile that is closed without changing it. `--trust-target-ca` on a profile rembro did not create removes the target's CAs again when the browser exits. rembro marks the profiles it creates with a `rembro-profile` file, locks a `rembro-session.lock` file in them while a session uses them, and keeps its prefs in `user.js` between two marker comments. For other profiles, the lock file is in `rembro/locks` in rembro's data directory.
 
 ## Opening pages
 
@@ -128,7 +132,7 @@ Where the pages open depends on the mode:
 - When the browser runs here, they open as new tabs.
 - With `--remote`, rembro starts the browser in the target again, which hands the pages to the running one. This can fail with Firefox on Wayland (see [Limitations](#limitations)).
 - With `--headless`, rembro opens them in Chromium through its debugging endpoint. Headless Firefox can't open them ([Letting a program drive the browser](#letting-a-program-drive-the-browser)).
-- With `rembro run`, rembro starts `rembro TARGET URL` on this machine for the first one, and later pages go to that browser.
+- With `rembro run`, rembro starts `rembro TARGET URL` on this machine for the first one, and later pages go to that browser. Its profile is temporary unless `REMBRO_PROFILE` names one.
 
 ## Letting a program drive the browser
 
@@ -143,7 +147,7 @@ Programs in sbx:myapp can drive this browser over CDP at http://127.0.0.1:9222
 
 From inside the target, Playwright's `chromium.connectOverCDP('http://127.0.0.1:9222')` and Puppeteer's `connect({ browserURL })` work against Chromium. Firefox serves WebDriver BiDi at `ws://127.0.0.1:PORT/session`, which Puppeteer reaches with `connect({ browserWSEndpoint, protocol: 'webDriverBiDi' })`.
 
-`--debug=PORT` asks for a particular port, and rembro stops with an error if that port is taken. `--debug` works with Chromium and Firefox only, and uses the `agent` profile unless you give `--profile`. When the browser runs here, the endpoint also listens on `[::1]`, for clients that resolve `localhost` to `::1`, and rembro refuses a profile that is already open in another window, since that browser can't be given a debugging port.
+`--debug=PORT` asks for a particular port, and rembro stops with an error if that port is taken. `--debug` works with Chromium and Firefox only. `REMBRO_PROFILE` doesn't apply to it, so the browser gets a new profile unless you give `--profile` or `--fork`. When the browser runs here, the endpoint also listens on `[::1]`, for clients that resolve `localhost` to `::1`. rembro refuses a profile given with `--profile` that is already open in another window, since that browser can't be given a debugging port; `--fork` it instead.
 
 With `--debug`, rembro starts Chromium with four flags that Playwright also passes when it starts Chromium: `--enable-features=CDPScreenshotNewSurface`, `--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding` and `--disable-background-timer-throttling`. Without them, Chromium throttles pages in background tabs and in covered or minimized windows, and screenshots of a minimized window time out, so a program driving the browser can fail while its window is out of sight. Firefox gets Playwright's prefs that stop it throttling timers in background tabs.
 
@@ -193,8 +197,9 @@ rembro install [OPTIONS] TARGET [BROWSER]
     --target-proxy        connect through the HTTP proxy named by the target's
                           https_proxy, http_proxy and no_proxy
     --trust-target-ca     trust the CA certificates added to the target's trust store
-    --profile NAME|PATH   profile to use
-    --temp-profile        throwaway profile
+    --profile NAME|PATH   keep the browser's data in this profile (also REMBRO_PROFILE)
+    --fork NAME|PATH      start from a copy of this profile
+    --temp-profile        a new profile, even when REMBRO_PROFILE is set
     --force-profile       use a profile that is open elsewhere, or a Firefox profile
                           rembro did not create
     --debug[=PORT]        expose the browser's debugging endpoint on the target's

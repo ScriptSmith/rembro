@@ -1,14 +1,21 @@
 //! `rembro run`: any program in the target, with its windows and sound shown here.
 
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use crate::cli::{Common, Run};
 use crate::host::{self, HostEvent, Limiter, Session};
 use crate::proto::{Call, Event};
-use crate::remote;
-use crate::sys;
+use crate::{profile, remote, sys};
 
 pub fn run(r: &Run, s: &Session, common: &Common) -> Result<i32, String> {
+    // Links from the program open in one browser here, with a profile of their own unless
+    // REMBRO_PROFILE names one.
+    let links = match std::env::var_os("REMBRO_PROFILE") {
+        Some(p) if !p.is_empty() => None,
+        _ => Some(profile::RunDir::create()?),
+    };
+    let links_profile = links.as_ref().map(profile::RunDir::profile);
     let dir: String = s.call(&Call::Mkdtemp)?;
     let gui = remote::setup_gui(s, &r.gui, &dir, false)?;
     s.call::<String>(&Call::Shim)?;
@@ -38,7 +45,9 @@ pub fn run(r: &Run, s: &Session, common: &Common) -> Result<i32, String> {
                 }
                 return Ok(host::exit_code(code, signal));
             }
-            Ok(HostEvent::Agent(Event::Open { url })) if limiter.allow() => open(common, s, &url),
+            Ok(HostEvent::Agent(Event::Open { url })) if limiter.allow() => {
+                open(common, s, links_profile.as_deref(), &url)
+            }
             Ok(HostEvent::Signal(sig)) => {
                 host::wait_exit(
                     s,
@@ -62,14 +71,19 @@ pub fn run(r: &Run, s: &Session, common: &Common) -> Result<i32, String> {
 }
 
 /// Opens a URL from the program in a browser here that uses the target's network, by
-/// starting `rembro TARGET URL`. Later URLs go to that browser's window.
-fn open(common: &Common, s: &Session, url: &str) {
+/// starting `rembro TARGET URL`. Later URLs go to that browser's window, since naming the
+/// profile keeps rembro from opening another one.
+fn open(common: &Common, s: &Session, profile: Option<&Path>, url: &str) {
     let Ok(exe) = std::env::current_exe() else { return };
     let mut cmd = Command::new(exe);
     if let Some(agent) = &common.agent {
         cmd.arg("--agent").arg(agent);
     }
-    cmd.args(["--no-watch", "--ports", "none", &s.label, url]).stdin(Stdio::null());
+    cmd.args(["--no-watch", "--ports", "none"]);
+    if let Some(p) = profile {
+        cmd.arg("--profile").arg(p);
+    }
+    cmd.args([&s.label, url]).stdin(Stdio::null());
     if !s.verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }

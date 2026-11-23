@@ -2,8 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::browser::Family;
+
 /// Bumped whenever a message changes shape, so mismatched builds fail clearly.
-pub const PROTOCOL: u32 = 4;
+pub const PROTOCOL: u32 = 5;
 
 /// A request from rembro to the agent. Each one gets exactly one reply.
 #[derive(Serialize, Deserialize, Debug)]
@@ -18,9 +20,6 @@ pub enum Call {
         groups: Vec<Vec<String>>,
     },
     Mkdtemp,
-    Mkdir {
-        path: String,
-    },
     ReadFile {
         path: String,
     },
@@ -70,6 +69,22 @@ pub enum Call {
         argv: Vec<String>,
         timeout_ms: u64,
     },
+    /// Creates a browser profile, or claims one that exists, and marks it as this session's
+    /// until the agent exits. Returns its path, and whether a browser already has it open.
+    Profile {
+        profile: ProfileSpec,
+        family: Family,
+        target: String,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "snake_case")]
+pub enum ProfileSpec {
+    /// The profile at this path, created if it does not exist.
+    Kept { path: String },
+    /// A new profile, deleted when the agent exits, that starts as a copy of `fork` if given.
+    Temp { fork: Option<String> },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

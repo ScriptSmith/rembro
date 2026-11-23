@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::browser::{self, Edit, Family, Gui, Net, Plan};
 use crate::certs;
-use crate::cli::Browse;
+use crate::cli::{Browse, ProfileArg};
 use crate::host::{self, DEBUG_ID, Endpoint, HostEvent, Limiter, Session};
 use crate::proto::{Call, Event};
 use crate::target::Target;
@@ -25,73 +25,63 @@ impl Drop for TempDir {
     }
 }
 
-fn profile_dir(cli: &Browse, s: &Session, name: &str) -> Result<(PathBuf, Option<TempDir>), String> {
-    let (path, temp) = if cli.temp_profile {
-        let p = util::mkdtemp(&std::env::temp_dir(), "rembro-profile-").map_err(|e| format!("mkdtemp: {e}"))?;
-        (p.clone(), Some(TempDir(p)))
-    } else {
-        match &cli.profile {
-            Some(p) if util::is_path(p) => (util::expand_home(p, util::home().as_deref()), None),
-            p => {
-                let profile = p.as_deref().unwrap_or(if cli.debug.is_some() { "agent" } else { "default" });
-                (
-                    util::data_dir().join("rembro/profiles").join(s.target.slug()).join(name).join(util::slug(profile)),
-                    None,
-                )
-            }
+/// The profile to use, and for one that only this session uses, the guard that deletes it.
+fn profile_dir(
+    cli: &Browse,
+    s: &Session,
+    browser: &browser::Resolved,
+) -> Result<(profile::Claimed, Option<profile::Discard>), String> {
+    let path_of = |p: &str| {
+        if util::is_path(p) {
+            util::expand_home(p, util::home().as_deref())
+        } else {
+            profile::kept_dir().join(s.target.slug()).join(&browser.name).join(util::slug(p))
         }
     };
-    let new = fs::read_dir(&path).map(|mut d| d.next().is_none()).unwrap_or(true);
-    fs::create_dir_all(&path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
-    if new {
-        profile::mark_created(&path);
-    }
-    if temp.is_some() || cli.profile.as_deref().is_none_or(|p| !util::is_path(p)) {
-        sys::set_mode(&path, 0o700);
-    }
-    Ok((path, temp))
-}
-
-/// Whether a running browser already has the profile open on this machine.
-#[cfg(unix)]
-fn in_use(profile: &Path, family: Family) -> bool {
-    let link = match family {
-        Family::Chromium => profile.join("SingletonLock"),
-        Family::Firefox => profile.join("lock"),
-        _ => return false,
+    let (fork, open) = match cli.profile_arg() {
+        ProfileArg::Kept(p) => {
+            let path = path_of(&p);
+            if !profile::is_run_profile(&path) {
+                let claimed = profile::claim(&path, browser.family, &s.label)?;
+                if !util::is_path(&p) {
+                    sys::set_mode(&path, 0o700);
+                }
+                return Ok((claimed, None));
+            }
+            // The profile that `rembro run` shares between the sessions it starts for links.
+            let dir = path.parent().unwrap_or(&path);
+            if !dir.is_dir() {
+                return Err(format!("{} is gone: the `rembro run` that this link came from has ended", dir.display()));
+            }
+            let claimed = profile::claim(&path, browser.family, &s.label)?;
+            // Checked after the claim, so that the directory can't be swapped in between.
+            if !sys::is_private_dir(dir) {
+                return Err(format!("{} is not a directory that only you can open", dir.display()));
+            }
+            let discard = (!claimed.busy).then(|| profile::Discard(path));
+            return Ok((claimed, discard));
+        }
+        ProfileArg::Temp => (None, false),
+        ProfileArg::Fork(p) => {
+            let src = path_of(&p);
+            if !util::is_path(&p) && !src.is_dir() {
+                return Err(format!("there is no {p} profile for {} in {}", s.label, browser.name));
+            }
+            let open = profile::is_open(&src);
+            if open {
+                eprintln!(
+                    "rembro: {p} is open in another window, so this browser starts from what that one last saved"
+                );
+            }
+            (Some(src), open)
+        }
     };
-    let Ok(target) = fs::read_link(link) else {
-        // Firefox on macOS makes no symlink, and locks .parentlock instead.
-        return family == Family::Firefox && sys::fcntl_locked(&profile.join(".parentlock"));
-    };
-    let target = target.to_string_lossy();
-    // Chromium writes HOST-PID; Firefox writes ADDRESS:+PID.
-    let (host, pid) = match family {
-        Family::Chromium => match target.rsplit_once('-') {
-            Some((h, p)) => (Some(h), p),
-            None => return false,
-        },
-        _ => match target.rsplit_once('+') {
-            Some((_, p)) => (None, p),
-            None => return false,
-        },
-    };
-    if host.is_some_and(|h| h != sys::hostname()) {
-        return false;
-    }
-    pid.parse::<u32>().is_ok_and(sys::pid_alive)
-}
-
-/// Whether a running browser already has the profile open on this machine. On Windows,
-/// Chromium and Firefox keep a lock file open without sharing it, and it goes when they exit.
-#[cfg(windows)]
-fn in_use(profile: &Path, family: Family) -> bool {
-    let lock = match family {
-        Family::Chromium => profile.join("lockfile"),
-        Family::Firefox => profile.join("parent.lock"),
-        _ => return false,
-    };
-    lock.exists() && fs::OpenOptions::new().write(true).open(&lock).is_err()
+    let claimed = profile::create_temp(&std::env::temp_dir(), fork.as_deref(), &s.label).map_err(|e| {
+        // On Windows, Chromium doesn't let other programs read its cookies while it runs.
+        if open { format!("{e}. Close the browser that has it open, and try again") } else { e }
+    })?;
+    let discard = profile::Discard(claimed.path.clone());
+    Ok((claimed, Some(discard)))
 }
 
 /// The port and browser path in Chromium's DevToolsActivePort file, once it is listening.
@@ -220,11 +210,17 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     }
     let socks_port =
         socks::serve(s.conn.clone(), s.verbose).map_err(|e| format!("cannot start the SOCKS server: {e}"))?;
-    let (profile, _temp) = profile_dir(b, s, &browser.name)?;
-    let busy = in_use(&profile, browser.family);
+    let (claimed, discard) = profile_dir(b, s, &browser)?;
+    let profile = claimed.path;
+    let busy = claimed.busy;
+    let _session = claimed.mark;
+    let temporary = discard.is_some();
+    // Declared after the mark, so that the profile goes before the next session can take it.
+    let _discard = discard;
     if busy && debug.is_some() {
         return Err(format!(
-            "{} is already open in another window, which cannot be given a debugging port; close it or pass --profile",
+            "{} is already open in another window, which cannot be given a debugging port; close it, or use --fork \
+             instead of --profile to start from a copy of it",
             profile.display()
         ));
     }
@@ -251,9 +247,6 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         }
     }
     let owned = profile::created_by_rembro(&profile);
-    if !busy {
-        profile::clear_stale_session(&profile);
-    }
     if !busy && let Err(e) = profile::restore(&profile) {
         eprintln!("rembro: could not put back the settings an earlier session changed: {e}");
     }
@@ -308,6 +301,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             root: false,
             small_shm: false,
             new_instance: first && !busy,
+            temporary,
             verbose: s.verbose,
         })
     };
@@ -333,11 +327,26 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     } else if b.trust_target_ca {
         eprintln!("rembro: the profile is open in another window, so its trusted CAs stay as they were");
     }
-    if host_debug.is_some() {
+    // Left by an earlier browser, it would name a port that nothing here listens on.
+    if !busy {
         let _ = fs::remove_file(profile.join("DevToolsActivePort"));
     }
     if busy && !b.force_profile {
         eprintln!("rembro: this profile is open in another rembro window for {}, so the pages open there", s.label);
+    }
+    // A Chromium with a debugging endpoint takes the pages through it, which is the only way
+    // headless Chromium takes them. Other browsers get them from a second launch, below.
+    if busy
+        && browser.family == Family::Chromium
+        && let Some(first) = urls.first()
+        && new_tab(&profile, first).is_ok()
+    {
+        for url in &urls[1..] {
+            if let Err(e) = new_tab(&profile, url) {
+                eprintln!("rembro: could not open {url}: {e}");
+            }
+        }
+        return Ok(0);
     }
     if s.verbose {
         eprintln!("rembro: SOCKS server on 127.0.0.1:{socks_port}; profile {}", profile.display());
@@ -358,7 +367,6 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         cmd.spawn().map_err(|e| format!("cannot run {}: {e}", argv[0]))
     };
     let mut child = spawn(&launch.argv, &launch.env, &launch.unset, s.quiet)?;
-    let _session = (!busy).then(|| profile::SessionMark::new(&profile, &s.label));
     let pid = child.id();
     let tx = s.sender.clone();
     thread::spawn(move || {
