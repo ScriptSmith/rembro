@@ -1,5 +1,6 @@
 //! Browsers rembro knows how to find and configure.
 
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use clap::ValueEnum;
@@ -298,6 +299,8 @@ pub enum Gui {
     Host,
     Wayland,
     X11,
+    /// No window at all.
+    Headless,
 }
 
 pub struct Plan<'a> {
@@ -328,6 +331,8 @@ pub struct Launch {
     pub env: Vec<(String, String)>,
     pub unset: Vec<String>,
     pub files: Vec<(String, Edit)>,
+    /// Pages that could not go on the command line, to open with `new_tab` once the browser runs.
+    pub later: Vec<String>,
 }
 
 pub const BLOCK_BEGIN: &str = "// rembro begin: rewritten each time rembro starts this profile";
@@ -367,7 +372,7 @@ fn pac(socks_port: u16) -> String {
 
 fn gui_env(l: &mut Launch, gui: Gui) {
     match gui {
-        Gui::Host => {}
+        Gui::Host | Gui::Headless => {}
         Gui::Wayland => l.env.push(("GDK_BACKEND".into(), "wayland".into())),
         Gui::X11 => {
             l.env.push(("GDK_BACKEND".into(), "x11".into()));
@@ -385,6 +390,9 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             p.browser.name
         )
     };
+    if p.gui == Gui::Headless && !matches!(p.browser.family, Family::Chromium | Family::Firefox) {
+        return Err(format!("--headless needs a Chromium or Firefox browser, not {}", p.browser.name));
+    }
     match p.browser.family {
         Family::Chromium => {
             l.argv.extend([
@@ -407,6 +415,13 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             }
             match p.gui {
                 Gui::Host => {}
+                Gui::Headless => l.argv.extend([
+                    "--headless".into(),
+                    "--mute-audio".into(),
+                    // As Playwright does, so that pages lay out for a mouse rather than a touch screen.
+                    "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4"
+                        .into(),
+                ]),
                 Gui::Wayland | Gui::X11 => {
                     l.argv.push(format!("--ozone-platform={}", if p.gui == Gui::Wayland { "wayland" } else { "x11" }));
                     l.argv.extend(["--disable-gpu".into(), "--password-store=basic".into()]);
@@ -442,6 +457,9 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             l.argv.extend(["--profile".into(), profile.to_string()]);
             if p.new_instance {
                 l.argv.push("--new-instance".into());
+            }
+            if p.gui == Gui::Headless {
+                l.argv.push("--headless".into());
             }
             if let Some(port) = p.debug_port {
                 l.argv.extend(["--remote-debugging-port".into(), port.to_string()]);
@@ -493,7 +511,7 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             let block: String = prefs.iter().map(|(k, v)| format!("user_pref(\"{k}\", {v});\n")).collect();
             l.files.push((format!("{profile}/user.js"), Edit::Block(block)));
             match p.gui {
-                Gui::Host => {}
+                Gui::Host | Gui::Headless => {}
                 Gui::Wayland => l.env.push(("MOZ_ENABLE_WAYLAND".into(), "1".into())),
                 Gui::X11 => {
                     l.env.push(("MOZ_ENABLE_WAYLAND".into(), "0".into()));
@@ -558,8 +576,28 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
         }
     }
     l.argv.extend(p.extra.iter().cloned());
-    l.argv.extend(p.urls.iter().cloned());
+    // Headless Chromium refuses to start with more than one page on its command line.
+    let first = if p.gui == Gui::Headless && p.browser.family == Family::Chromium { 1 } else { p.urls.len() };
+    let (now, later) = p.urls.split_at(first.min(p.urls.len()));
+    l.argv.extend(now.iter().cloned());
+    l.later = later.to_vec();
     Ok(l)
+}
+
+/// Asks a running Chromium to open `url` in a new tab, over a connection to its debugging
+/// endpoint. This is how pages reach headless Chromium, which a second launch can't hand them to.
+pub fn new_tab(mut conn: impl Read + Write, url: &str) -> Result<(), String> {
+    let request = format!(
+        "PUT /json/new?{} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        util::percent_encode(url)
+    );
+    conn.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    let mut status = String::new();
+    BufReader::new(conn.take(1024)).read_line(&mut status).map_err(|e| e.to_string())?;
+    match status.split_whitespace().nth(1) {
+        Some("200") => Ok(()),
+        _ => Err(format!("the browser answered {:?}", status.trim())),
+    }
 }
 
 /// Which debugging protocol a family speaks, and the endpoint URL for a port.
@@ -619,5 +657,25 @@ mod tests {
         assert!(l.argv.contains(&"--remote-debugging-port=0".to_string()));
         assert!(l.argv.contains(&"--enable-features=CDPScreenshotNewSurface".to_string()));
         assert_eq!(l.argv.last().unwrap(), "http://localhost:5173");
+        assert!(l.later.is_empty());
+
+        let urls = ["http://localhost:5173".to_string(), "http://localhost:8080".to_string()];
+        let l = launch(&Plan {
+            browser: &b,
+            profile: "/p",
+            net: Net::Native,
+            gui: Gui::Headless,
+            debug_port: Some(9222),
+            urls: &urls,
+            extra: &[],
+            root: false,
+            small_shm: false,
+            new_instance: true,
+            verbose: false,
+        })
+        .unwrap();
+        assert!(l.argv.contains(&"--headless".to_string()));
+        assert_eq!(l.argv.last().unwrap(), "http://localhost:5173");
+        assert_eq!(l.later, ["http://localhost:8080"]);
     }
 }

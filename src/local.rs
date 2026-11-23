@@ -94,6 +94,38 @@ fn in_use(profile: &Path, family: Family) -> bool {
     lock.exists() && fs::OpenOptions::new().write(true).open(&lock).is_err()
 }
 
+/// The port and browser path in Chromium's DevToolsActivePort file, once it is listening.
+fn devtools_port(profile: &Path) -> Option<(u16, String)> {
+    let text = fs::read_to_string(profile.join("DevToolsActivePort")).ok()?;
+    let mut lines = text.lines();
+    Some((lines.next()?.trim().parse().ok()?, lines.next()?.to_string()))
+}
+
+/// Opens a page in the headless Chromium that has this profile open.
+fn new_tab(profile: &Path, url: &str) -> Result<(), String> {
+    let (port, _) = devtools_port(profile).ok_or("the browser is not listening for pages yet")?;
+    let conn = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).map_err(|e| e.to_string())?;
+    let _ = conn.set_read_timeout(Some(Duration::from_secs(10)));
+    browser::new_tab(conn, url)
+}
+
+/// Opens pages in the headless Chromium that has this profile open, once it is listening.
+fn open_later(profile: &Path, urls: Vec<String>) {
+    let profile = profile.to_path_buf();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        for url in urls {
+            while let Err(e) = new_tab(&profile, &url) {
+                if Instant::now() >= deadline {
+                    eprintln!("rembro: could not open {url}: {e}");
+                    break;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    });
+}
+
 fn apply_files(files: Vec<(String, Edit)>) -> Result<(), String> {
     for (path, edit) in files {
         let data = match edit {
@@ -124,9 +156,7 @@ fn connect_debugger(s: &Session, family: Family, profile: &Path, port: u16, targ
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             let found = match family {
-                Family::Chromium => fs::read_to_string(profile.join("DevToolsActivePort"))
-                    .ok()
-                    .and_then(|t| Some((t.lines().next()?.trim().parse::<u16>().ok()?, t.lines().nth(1)?.to_string()))),
+                Family::Chromium => devtools_port(&profile),
                 _ => TcpStream::connect((Ipv4Addr::LOCALHOST, port)).ok().map(|_| (port, "/session".to_string())),
             };
             if let Some((port, path)) = found {
@@ -251,6 +281,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     let mut _page_dir = None;
     if let Some(port) = target_debug
         && let Some(page) = host::announce_debug(s, browser.family, port)
+        && !b.headless
     {
         let dir = util::mkdtemp(&util::runtime_base(), "rembro-").map_err(|e| format!("mkdtemp: {e}"))?;
         let path = dir.join("attach.html");
@@ -270,7 +301,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             browser: &browser,
             profile: &profile_str,
             net: Net::Proxy { socks_port, loopback_only: b.loopback_only },
-            gui: Gui::Host,
+            gui: if b.headless { Gui::Headless } else { Gui::Host },
             debug_port: if first { host_debug } else { None },
             urls,
             extra: if first { &b.browser_args } else { &[] },
@@ -340,10 +371,25 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if let (Some(port), Some(target_port)) = (host_debug, target_debug) {
         connect_debugger(s, browser.family, &profile, port, target_port, s.verbose);
     }
+    if !launch.later.is_empty() {
+        open_later(&profile, launch.later);
+    }
     // Opens more pages by starting the browser again, which hands them to the running one.
+    // Headless browsers take no such hand-off.
     let open = |url: &str| {
         if s.verbose {
             eprintln!("rembro: opening {url}");
+        }
+        if b.headless {
+            if browser.family == Family::Chromium {
+                open_later(&profile, vec![url.to_string()]);
+            } else {
+                eprintln!(
+                    "rembro: headless {} takes no more pages once it has started, so {url} stays closed",
+                    browser.name
+                );
+            }
+            return;
         }
         let result = launch_for(&[url.to_string()], false).and_then(|l| spawn(&l.argv, &l.env, &l.unset, !s.verbose));
         match result {
@@ -353,7 +399,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             Err(e) => eprintln!("rembro: could not open {url}: {e}"),
         }
     };
-    if b.watching() {
+    if host::can_watch(b, &browser) {
         host::watch_ports(s, ports.clone(), exclude, seen);
     }
 

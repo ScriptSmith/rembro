@@ -16,6 +16,7 @@ rembro ssh:bastion http://10.0.4.12:3000         # an address only the bastion c
 rembro ssh:bastion,ssh:box,docker:web            # a container on a host behind the bastion
 rembro --remote ssh:devbox                       # run the browser on devbox, show its window here
 rembro --debug sbx:myapp                         # let an AI agent in the sandbox drive the browser
+rembro --debug --headless sbx:myapp              # the same, with no browser window
 rembro run ssh:devbox gimp                       # any GUI program, window shown here
 rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
 ```
@@ -25,7 +26,7 @@ rembro install docker:shop-web-1 firefox         # put a browser in the containe
 - Preview a web app running on a remote dev box, in a dev container or in a Docker sandbox, without `ssh -L` or `docker run -p`.
 - Open a Kubernetes service, an admin UI or a metrics dashboard without `kubectl port-forward`, using cluster DNS names.
 - Reach internal sites and private IPs that only a bastion host or VPN gateway can see, without setting up an `ssh -D` SOCKS proxy by hand.
-- Let an AI coding agent in a sandbox drive a real browser with Playwright or Puppeteer over CDP or WebDriver BiDi, while you watch.
+- Let an AI coding agent in a sandbox drive a real browser with Playwright or Puppeteer over CDP or WebDriver BiDi, while you watch or with no window at all.
 - Run graphical Linux programs on a server, in a container or in a VM, and see their windows on your desktop, with sound.
 
 ## Install

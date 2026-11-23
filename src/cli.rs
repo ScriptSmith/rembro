@@ -30,6 +30,7 @@ Examples:
   rembro ssh:bastion,ssh:box,docker:web a container on a host behind a bastion
   rembro --remote ssh:devbox            run Chromium on devbox and show its window here
   rembro --debug sbx:myapp              let an agent in the sandbox drive the browser
+  rembro --debug --headless sbx:myapp   the same, with no browser window
   rembro sbx:myapp -- --incognito       pass arguments to the browser
   rembro run ssh:devbox gimp            run any program there, with its window here
   rembro install docker:web firefox     install a browser in the target for --remote";
@@ -127,6 +128,11 @@ pub struct Browse {
     /// unless --profile is given
     #[arg(long, value_name = "PORT", num_args = 0..=1, require_equals = true, default_missing_value = "auto")]
     pub debug: Option<String>,
+
+    /// Run the browser without a window, for a program that drives it with --debug.
+    /// Chromium and Firefox only
+    #[arg(long, requires = "debug")]
+    pub headless: bool,
 
     /// Ports to look for HTTP servers on: ranges like 3000-3999, patterns like 41xx,
     /// `all` or `none`

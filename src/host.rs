@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::boot::{self, AgentBin};
-use crate::browser::Family;
-use crate::cli::{Cli, Command, Common};
+use crate::browser::{Family, Resolved};
+use crate::cli::{Browse, Cli, Command, Common};
 use crate::mux::{Handler, Mux, Sock};
 use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL};
 use crate::target::Target;
@@ -326,6 +326,21 @@ pub fn server_urls(s: &Session, spec: &PortSpec, exclude: &[u16]) -> Result<(Vec
         eprintln!("rembro: no HTTP servers are listening on {}'s loopback", s.label);
     }
     Ok((http.into_iter().map(|p| format!("http://localhost:{p}")).collect(), listening))
+}
+
+/// Whether to open servers that start later: by default when no URL is given, but never in
+/// headless Firefox, which takes no more pages once it has started.
+pub fn can_watch(b: &Browse, browser: &Resolved) -> bool {
+    if b.headless && browser.family == Family::Firefox {
+        if b.watch {
+            eprintln!(
+                "rembro: headless {} takes no more pages once it has started, so --watch does nothing",
+                browser.name
+            );
+        }
+        return false;
+    }
+    b.watching()
 }
 
 /// Polls the target for new listening ports, and reports those that answer HTTP.

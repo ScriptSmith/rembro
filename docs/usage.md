@@ -127,6 +127,7 @@ Where the pages open depends on the mode:
 
 - When the browser runs here, they open as new tabs.
 - With `--remote`, rembro starts the browser in the target again, which hands the pages to the running one. This can fail with Firefox on Wayland (see [Limitations](#limitations)).
+- With `--headless`, rembro opens them in Chromium through its debugging endpoint. Headless Firefox can't open them ([Letting a program drive the browser](#letting-a-program-drive-the-browser)).
 - With `rembro run`, rembro starts `rembro TARGET URL` on this machine for the first one, and later pages go to that browser.
 
 ## Letting a program drive the browser
@@ -145,6 +146,8 @@ From inside the target, Playwright's `chromium.connectOverCDP('http://127.0.0.1:
 `--debug=PORT` asks for a particular port, and rembro stops with an error if that port is taken. `--debug` works with Chromium and Firefox only, and uses the `agent` profile unless you give `--profile`. When the browser runs here, the endpoint also listens on `[::1]`, for clients that resolve `localhost` to `::1`, and rembro refuses a profile that is already open in another window, since that browser can't be given a debugging port.
 
 With `--debug`, rembro starts Chromium with four flags that Playwright also passes when it starts Chromium: `--enable-features=CDPScreenshotNewSurface`, `--disable-backgrounding-occluded-windows`, `--disable-renderer-backgrounding` and `--disable-background-timer-throttling`. Without them, Chromium throttles pages in background tabs and in covered or minimized windows, and screenshots of a minimized window time out, so a program driving the browser can fail while its window is out of sight. Firefox gets Playwright's prefs that stop it throttling timers in background tabs.
+
+`--headless` runs the browser with no window, for when nobody needs to watch it. It needs `--debug`, and works with Chromium and Firefox. rembro prints how to connect, and doesn't open the tab that shows it. Headless Chromium gets `--mute-audio`, and Playwright's `--blink-settings` so that pages see a mouse and lay out as they would on a desktop. It accepts only one page on its command line, so rembro opens the others through its debugging endpoint. Headless Firefox opens the pages it starts with but no more after that: a second launch can't hand it pages, and the program driving it holds the one WebDriver BiDi session that Firefox allows. rembro therefore doesn't watch for new servers with headless Firefox. A headless browser runs until you stop rembro, and with `--remote` the target needs no display.
 
 Without `--remote`, the browser runs on this machine, so a program in the target that drives it can read your files. [Security](security.md#debugging) has the details.
 
@@ -196,6 +199,7 @@ rembro install [OPTIONS] TARGET [BROWSER]
                           rembro did not create
     --debug[=PORT]        expose the browser's debugging endpoint on the target's
                           127.0.0.1:PORT (default 9222, or a free port)
+    --headless            run the browser with no window (needs --debug)
     --ports PORTS         where to look for HTTP servers: ports such as 8080, ranges
                           such as 3000-3999, patterns such as 41xx, all or none
                           (default 1-32767; also REMBRO_PORTS)

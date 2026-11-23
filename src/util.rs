@@ -387,6 +387,19 @@ pub fn base64(data: &[u8]) -> String {
     out
 }
 
+/// Percent-encodes everything but letters, digits and `-._~`.
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Percent-encodes a path for a file:// URL. A Windows path such as C:\a\b becomes file:///C:/a/b.
 pub fn file_url(path: &str) -> String {
     let drive = path.len() >= 2 && path.as_bytes()[0].is_ascii_alphabetic() && path.as_bytes()[1] == b':';

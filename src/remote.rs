@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::browser::{self, Edit, Family, Gui, Net, Plan, Resolved};
 use crate::cli::{Browse, DisplayArg, GuiOpts};
-use crate::host::{self, Endpoint, HostEvent, Limiter, PULSE_ID, Session, WAYLAND_ID, X11_ID};
+use crate::host::{self, Conn, Endpoint, HostEvent, Limiter, PULSE_ID, Session, WAYLAND_ID, X11_ID};
 use crate::local::TempDir;
 use crate::mux::Sock;
 use crate::proto::{Addr, Call, Event, Open};
@@ -318,6 +318,31 @@ fn profile_dir(b: &Browse, s: &Session, browser: &str, dir: &str) -> Result<Stri
     s.call(&Call::Mkdir { path })
 }
 
+/// Opens a page in the Chromium listening for CDP on `port` in the target.
+fn new_tab(conn: &Conn, port: u16, url: &str) -> Result<(), String> {
+    let (a, b) = Sock::pair().map_err(|e| e.to_string())?;
+    b.set_timeout(Some(Duration::from_secs(10)));
+    conn.mux().open(&Open::Tcp { host: "127.0.0.1".into(), port }, a, |_, _| ())?;
+    browser::new_tab(b, url)
+}
+
+/// Opens pages in the headless Chromium in the target once its debugging port answers.
+fn open_later(s: &Session, port: u16, urls: Vec<String>) {
+    let conn = s.conn.clone();
+    thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        for url in urls {
+            while let Err(e) = new_tab(&conn, port, &url) {
+                if Instant::now() >= deadline {
+                    eprintln!("rembro: could not open {url}: {e}");
+                    break;
+                }
+                thread::sleep(Duration::from_millis(200));
+            }
+        }
+    });
+}
+
 pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     let dir: String = s.call(&Call::Mkdtemp)?;
     let browser = resolve(s, &b.browser, b.family)?;
@@ -329,7 +354,10 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         return Err(format!("--debug needs a Chromium or Firefox browser, not {}", browser.name));
     }
     let mut gui_opts = b.gui.clone();
-    if gui_opts.display == DisplayArg::Auto
+    if b.headless {
+        gui_opts.display = DisplayArg::None;
+        gui_opts.no_audio = true;
+    } else if gui_opts.display == DisplayArg::Auto
         && x11::Display::from_env().is_some()
         && let Some(major) = old_chromium(s, &browser)
     {
@@ -339,8 +367,8 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         );
         gui_opts.display = DisplayArg::X11;
     }
-    let gui = setup_gui(s, &gui_opts, &dir, true)?;
-    let gui_kind = gui.gui.unwrap_or(Gui::X11);
+    let gui = setup_gui(s, &gui_opts, &dir, !b.headless)?;
+    let gui_kind = if b.headless { Gui::Headless } else { gui.gui.unwrap_or(Gui::X11) };
     let started = Instant::now();
     s.call::<String>(&Call::Shim)?;
 
@@ -368,6 +396,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     }
     if let Some(port) = debug_port
         && let Some(page) = host::announce_debug(s, browser.family, port)
+        && !b.headless
     {
         let path = write(s, &format!("{dir}/attach.html"), page.into_bytes(), 0o644)?;
         urls.push(util::file_url(&path));
@@ -411,10 +440,26 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         s.call(&Call::Spawn { argv: full, env: all_env, unset, shim: true })
     };
     let proc = spawn(launch.argv, launch.env, launch.unset)?;
+    if let Some(port) = debug_port
+        && !launch.later.is_empty()
+    {
+        open_later(s, port, launch.later);
+    }
     // Opens more pages by starting the browser again, which hands them to the running one.
+    // Headless browsers take no such hand-off.
     let open = |url: &str| {
         if s.verbose {
             eprintln!("rembro: opening {url}");
+        }
+        if b.headless {
+            match debug_port {
+                Some(port) if browser.family == Family::Chromium => open_later(s, port, vec![url.to_string()]),
+                _ => eprintln!(
+                    "rembro: headless {} takes no more pages once it has started, so {url} stays closed",
+                    browser.name
+                ),
+            }
+            return;
         }
         if let Ok(l) = launch_for(&[url.to_string()], false)
             && let Err(e) = spawn(l.argv, l.env, l.unset)
@@ -422,7 +467,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             eprintln!("rembro: could not open {url}: {e}");
         }
     };
-    if b.watching() {
+    if host::can_watch(b, &browser) {
         host::watch_ports(s, ports.clone(), exclude.clone(), seen);
     }
 
