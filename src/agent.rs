@@ -58,6 +58,13 @@ pub fn main(args: &[String]) -> ! {
     }
 
     let (closed_tx, closed_rx) = mpsc::channel();
+    // SIGINT, SIGTERM and SIGHUP end the agent as the end of its input does, once it has
+    // stopped what it started and deleted its files. This must come before any other thread
+    // starts.
+    let signalled = Mutex::new(closed_tx.clone());
+    sys::on_signals(move |_| {
+        let _ = signalled.lock().unwrap().send(());
+    });
     let agent = Arc::new(Agent {
         procs: Mutex::new(HashMap::new()),
         groups: Mutex::new(Vec::new()),
@@ -534,7 +541,14 @@ impl Handler for Arc<Agent> {
             Open::Store { path, size, mode } => {
                 let path = self.path(&path).map_err(|e| format!("other: {e}"))?;
                 let (a, b) = UnixStream::pair().map_err(|e| format!("other: {e}"))?;
-                thread::spawn(move || store(b, &path, size, mode));
+                let tmp = path.with_file_name(format!(
+                    ".{}.{}",
+                    path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                    std::process::id()
+                ));
+                // If the agent exits before the whole file has come, the part that came goes too.
+                self.files.lock().unwrap().push(tmp.clone());
+                thread::spawn(move || store(b, &path, &tmp, size, mode));
                 Ok(Sock::Unix(a))
             }
         }
@@ -596,27 +610,25 @@ fn os_ids() -> Vec<String> {
     ids
 }
 
-/// Receives a file over a channel: exactly `size` bytes, then answers "ok" or an error.
-fn store(mut s: UnixStream, path: &Path, size: u64, mode: u32) {
+/// Receives a file over a channel into `tmp`: exactly `size` bytes, which then replace `path`,
+/// and answers "ok" or an error.
+fn store(mut s: UnixStream, path: &Path, tmp: &Path, size: u64, mode: u32) {
     let result = (|| -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_file_name(format!(
-            ".{}.{}",
-            path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
-            std::process::id()
-        ));
-        let mut f = OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(&tmp)?;
+        let mut f = OpenOptions::new().write(true).create(true).truncate(true).mode(mode).open(tmp)?;
         let n = io::copy(&mut (&mut s).take(size), &mut f)?;
         if n != size {
-            let _ = fs::remove_file(&tmp);
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("got {n} of {size} bytes")));
         }
         f.sync_all()?;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
-        fs::rename(&tmp, path)
+        fs::set_permissions(tmp, fs::Permissions::from_mode(mode))?;
+        fs::rename(tmp, path)
     })();
+    if result.is_err() {
+        let _ = fs::remove_file(tmp);
+    }
     let reply = match result {
         Ok(()) => "ok\n".to_string(),
         Err(e) => format!("cannot write {}: {e}\n", path.display()),
@@ -982,6 +994,35 @@ mod tests {
         assert!(!no_proxy_matches("10.0.0.0/8", "11.1.2.3"));
         assert!(no_proxy_matches("::1", "::1"));
         assert!(no_proxy_matches("*", "anything"));
+    }
+
+    #[test]
+    fn uploads() {
+        let dir = util::mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
+        let (path, tmp) = (dir.join("tool"), dir.join(".tool.1"));
+        let upload = |data: &'static [u8], size: u64| {
+            let (mut a, b) = UnixStream::pair().unwrap();
+            let (path, tmp) = (path.clone(), tmp.clone());
+            let stored = thread::spawn(move || store(b, &path, &tmp, size, 0o700));
+            a.write_all(data).unwrap();
+            a.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut reply = String::new();
+            a.read_to_string(&mut reply).unwrap();
+            stored.join().unwrap();
+            reply
+        };
+        assert_eq!(upload(b"complete", 8), "ok\n");
+        assert_eq!(fs::read(&path).unwrap(), b"complete");
+        // The connection ends before the whole file has come.
+        assert!(upload(b"part", 8).contains("got 4 of 8 bytes"));
+        assert_eq!(fs::read(&path).unwrap(), b"complete");
+        assert!(!tmp.exists());
+        // The whole file came, but can't take the place of what is there.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir_all(path.join("in-the-way")).unwrap();
+        assert!(upload(b"complete", 8).starts_with("cannot write"));
+        assert!(!tmp.exists());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

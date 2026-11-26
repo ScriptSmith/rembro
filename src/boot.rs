@@ -146,6 +146,9 @@ fn local_agent() -> Result<(std::process::Command, String), String> {
     let hash = crate::agent::self_hash().map_err(|e| format!("cannot read this executable: {e}"))?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("agent");
+    // Ctrl-C then reaches only rembro, which ends the session. The commands that reach other
+    // targets stay in rembro's group, since they may ask for a password on the terminal.
+    sys::own_group(&mut cmd);
     Ok((cmd, hash))
 }
 

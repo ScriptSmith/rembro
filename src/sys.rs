@@ -16,6 +16,7 @@ mod imp {
     use super::*;
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::os::unix::process::{CommandExt, ExitStatusExt};
+    use std::time::{Duration, Instant};
 
     /// Calls `f` with each SIGINT, SIGTERM or SIGHUP. Run this before any other thread
     /// starts: it blocks those signals so that one thread can wait for them, and threads
@@ -61,6 +62,19 @@ mod imp {
     /// Sends `sig` to the process group that `own_group` started.
     pub fn signal_group(pid: u32, sig: i32) {
         unsafe { libc::kill(-(pid as i32), sig) };
+    }
+
+    /// Waits up to `timeout` for the processes left in the group that `own_group` started, once
+    /// its first process has exited, and kills those that remain.
+    pub fn wait_group(pid: u32, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while unsafe { libc::kill(-(pid as i32), 0) } == 0 {
+            if Instant::now() >= deadline {
+                signal_group(pid, SIGKILL);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
@@ -212,6 +226,10 @@ mod imp {
         let _ = cmd.args(["/T", "/PID", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
 
+    /// Does nothing, since Windows can't find the rest of a process tree once its first
+    /// process has exited.
+    pub fn wait_group(_pid: u32, _timeout: Duration) {}
+
     pub fn exit_signal(_status: &ExitStatus) -> Option<i32> {
         None
     }
@@ -255,5 +273,35 @@ mod imp {
 
     pub fn is_socket(_path: &Path) -> bool {
         false
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::time::{Duration, Instant};
+
+    /// Runs `argv` in a process group of its own, and returns its ID and a thread that reaps it.
+    fn group(argv: &[&str]) -> (u32, std::thread::JoinHandle<ExitStatus>) {
+        let mut cmd = Command::new(argv[0]);
+        cmd.args(&argv[1..]);
+        own_group(&mut cmd);
+        let mut child = cmd.spawn().unwrap();
+        (child.id(), std::thread::spawn(move || child.wait().unwrap()))
+    }
+
+    #[test]
+    fn groups() {
+        let alive = |pid: u32| unsafe { libc::kill(-(pid as i32), 0) } == 0;
+        let started = Instant::now();
+        let (pid, reaped) = group(&["sleep", "0.5"]);
+        wait_group(pid, Duration::from_secs(30));
+        assert!(!alive(pid) && started.elapsed() < Duration::from_secs(20));
+        assert!(reaped.join().unwrap().success());
+        // What is still running when the time is up is killed.
+        let (pid, reaped) = group(&["sleep", "60"]);
+        wait_group(pid, Duration::from_millis(200));
+        assert_eq!(reaped.join().unwrap().signal(), Some(SIGKILL));
     }
 }

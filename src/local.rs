@@ -444,6 +444,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             Ok(st) => (st.code(), sys::exit_signal(&st)),
             Err(_) => (Some(1), None),
         };
+        // The browser's other processes can outlast it for a moment, and would write to the
+        // profile while it is deleted.
+        sys::wait_group(pid, Duration::from_secs(3));
         let _ = tx.send(HostEvent::BrowserExited(code, signal));
     });
     if let (Some(port), Some(target_port)) = (host_debug, target_debug) {

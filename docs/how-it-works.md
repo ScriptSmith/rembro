@@ -61,11 +61,11 @@ Sound from the target plays here through this machine's PulseAudio server, or Pi
 
 ## Lifecycle
 
-rembro exits when the browser or program does, with its exit status. On Ctrl-C, SIGTERM or SIGHUP it asks the program to close, kills it after five seconds, and exits with 128 plus the signal number. On Windows, Ctrl-C, Ctrl-Break and closing the console window do the same, and rembro closes a browser on this machine with `taskkill`, adding `/F` after five seconds.
+rembro exits when the browser or program does, with its exit status. On Ctrl-C, SIGTERM or SIGHUP it asks the program to close, kills it after five seconds, and exits with 128 plus the signal number. On Windows, Ctrl-C, Ctrl-Break and closing the console window do the same, and rembro closes a browser on this machine with `taskkill`, adding `/F` after five seconds. On Linux and macOS, when a browser here exits, rembro waits up to three seconds for the rest of its processes, and kills those still running, before it deletes a temporary profile.
 
 When the browser runs here and the connection to the target drops, the browser stays open and rembro reconnects, retrying after one second and then with a delay that doubles up to 15 seconds. Pages that load in the meantime fail. If the `--debug` endpoint has to move to another port after a reconnect, rembro says so. With `--remote` and `rembro run`, the program lives in the target and ends with the connection.
 
-The agent in the target stops when its stdin closes, or after 60 seconds without hearing from rembro, since some transports (older `kubectl`) don't pass on the end of input. It then sends SIGTERM to everything it started, sends SIGKILL to what is left three seconds later, and deletes its temporary directory and URL socket. Programs it starts are also killed if the agent itself dies. rembro gives up on an agent it hasn't heard from in 60 seconds in the same way.
+The agent in the target stops when its stdin closes, when it gets SIGINT, SIGTERM or SIGHUP, or after 60 seconds without hearing from rembro, since some transports (older `kubectl`) don't pass on the end of input. It then sends SIGTERM to everything it started, sends SIGKILL to what is left three seconds later, and deletes its temporary directory, any temporary profile and its URL socket. Programs it starts are also killed if the agent itself dies. With the `local` target, the agent runs in a process group of its own, so that Ctrl-C reaches only rembro. rembro gives up on an agent it hasn't heard from in 60 seconds in the same way.
 
 ## Building from source
 
