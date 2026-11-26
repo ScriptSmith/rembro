@@ -10,8 +10,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::browser::Family;
-use crate::cli::Profiles;
+use crate::browser::{self, Family, Os, Resolved};
+use crate::cli::{ProfileArg, Profiles};
 use crate::{certs, sys, util};
 
 /// Present in profiles that rembro created.
@@ -81,6 +81,8 @@ pub struct Claimed {
     pub busy: bool,
     /// Marks the profile as this session's, unless a browser already had it open.
     pub mark: Option<SessionMark>,
+    /// For one of Chromium's own profiles, or a copy of one, its directory in `path`.
+    pub directory: Option<String>,
 }
 
 /// Creates the profile at `path` if it does not exist, and marks it as this session's. When
@@ -88,30 +90,42 @@ pub struct Claimed {
 /// so that this session hands it the pages rather than starting a second browser that could
 /// take the profile from it.
 pub fn claim(path: &Path, family: Family, target: &str) -> Result<Claimed, String> {
-    claim_within(path, family, target, Duration::from_secs(30))
+    claim_within(path, family, target, Duration::from_secs(30), true)
 }
 
-fn claim_within(path: &Path, family: Family, target: &str, wait: Duration) -> Result<Claimed, String> {
+/// Marks one of the browser's own profiles as this session's, as `claim` does, without
+/// writing anything in it.
+pub fn claim_own(own: &Own, family: Family, target: &str) -> Result<Claimed, String> {
+    let claimed = claim_within(&own.path, family, target, Duration::from_secs(30), false)?;
+    Ok(Claimed { directory: own.directory.clone(), ..claimed })
+}
+
+fn claim_within(path: &Path, family: Family, target: &str, wait: Duration, create: bool) -> Result<Claimed, String> {
     let started = Instant::now();
     let mut told = false;
+    let claimed = |busy, mark| Claimed { path: path.to_path_buf(), busy, mark, directory: None };
     loop {
         if in_use(path, family) {
-            return Ok(Claimed { path: path.to_path_buf(), busy: true, mark: None });
+            return Ok(claimed(true, None));
         }
-        let new = fs::read_dir(path).map(|mut d| d.next().is_none()).unwrap_or(true);
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        sys::create_private_dir(path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
-        if new {
-            mark_created(path);
+        if create {
+            let new = fs::read_dir(path).map(|mut d| d.next().is_none()).unwrap_or(true);
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            sys::create_private_dir(path).map_err(|e| format!("cannot create {}: {e}", path.display()))?;
+            if new {
+                mark_created(path);
+            }
+        } else if !path.is_dir() {
+            return Err(format!("there is no profile at {}", path.display()));
         }
         if let Some(mark) = SessionMark::claim(path, target) {
-            return Ok(Claimed { path: path.to_path_buf(), busy: false, mark: Some(mark) });
+            return Ok(claimed(false, Some(mark)));
         }
         // Only Chromium's and Firefox's browsers can be seen to start.
         if !matches!(family, Family::Chromium | Family::Firefox) || started.elapsed() >= wait {
-            return Ok(Claimed { path: path.to_path_buf(), busy: true, mark: None });
+            return Ok(claimed(true, None));
         }
         if !told && started.elapsed() >= Duration::from_secs(2) {
             eprintln!("rembro: waiting for the rembro session that has {} to start its browser", path.display());
@@ -122,19 +136,21 @@ fn claim_within(path: &Path, family: Family, target: &str, wait: Duration) -> Re
 }
 
 /// Creates a temporary profile in `base` and marks it as this session's. With `fork`, it
-/// starts as a copy of that profile. The caller deletes it when the session ends.
-pub fn create_temp(base: &Path, fork: Option<&Path>, target: &str) -> Result<Claimed, String> {
-    if let Some(src) = fork
-        && !src.is_dir()
-    {
-        return Err(format!("there is no profile at {}", src.display()));
+/// starts as a copy of that profile, or with `directory` too, of that one of the Chromium
+/// profiles in `fork`. The caller deletes it when the session ends.
+pub fn create_temp(base: &Path, fork: Option<&Path>, directory: Option<&str>, target: &str) -> Result<Claimed, String> {
+    if let Some(src) = fork {
+        let dir = directory.map_or_else(|| src.to_path_buf(), |d| src.join(d));
+        if !dir.is_dir() {
+            return Err(format!("there is no profile at {}", dir.display()));
+        }
     }
     let path = util::mkdtemp(base, TEMP_PREFIX).map_err(|e| format!("mkdtemp: {e}"))?;
     mark_created(&path);
     // Locked before the copy, so that `rembro profiles --prune` leaves it alone.
     let mark = SessionMark::claim(&path, target);
     if let Some(src) = fork {
-        if let Err(e) = copy_profile(src, &path) {
+        if let Err(e) = copy_profile(src, &path, directory) {
             let _ = fs::remove_dir_all(&path);
             return Err(format!("cannot copy {}: {e}", src.display()));
         }
@@ -143,7 +159,7 @@ pub fn create_temp(base: &Path, fork: Option<&Path>, target: &str) -> Result<Cla
             touch(src);
         }
     }
-    Ok(Claimed { path, busy: false, mark })
+    Ok(Claimed { path, busy: false, mark, directory: directory.map(String::from) })
 }
 
 /// Changes the profile directory's time, which `rembro profiles` shows as its last use, as
@@ -269,21 +285,24 @@ const CACHES: &[&str] = &[
     "shader-cache",
 ];
 
-/// Copies a profile, which a browser may have open, into the empty directory `dst`.
-fn copy_profile(src: &Path, dst: &Path) -> io::Result<()> {
-    fn copy_dir(src: &Path, dst: &Path, top: bool) -> io::Result<()> {
+/// Copies a profile, which a browser may have open, into the empty directory `dst`. With
+/// `only`, `src` is a Chromium user data directory, and the copy has just that profile and
+/// the `Local State` with the key that its cookies and passwords are encrypted with.
+fn copy_profile(src: &Path, dst: &Path, only: Option<&str>) -> io::Result<()> {
+    fn copy_dir(src: &Path, dst: &Path, top: bool, only: Option<&str>) -> io::Result<()> {
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if CACHES.contains(&name.as_ref()) || (top && NOT_COPIED.contains(&name.as_ref())) {
+            let other = only.is_some_and(|d| name != d && name != "Local State");
+            if CACHES.contains(&name.as_ref()) || (top && (NOT_COPIED.contains(&name.as_ref()) || other)) {
                 continue;
             }
             // Symbolic links are left out too: in a profile, they are Chromium's and Firefox's locks.
             let kind = entry.file_type()?;
             let to = dst.join(entry.file_name());
             let result = if kind.is_dir() {
-                fs::create_dir_all(&to).and_then(|()| copy_dir(&entry.path(), &to, false))
+                fs::create_dir_all(&to).and_then(|()| copy_dir(&entry.path(), &to, false, None))
             } else if kind.is_file() {
                 fs::copy(entry.path(), &to).map(|_| ())
             } else {
@@ -297,7 +316,10 @@ fn copy_profile(src: &Path, dst: &Path) -> io::Result<()> {
         }
         Ok(())
     }
-    copy_dir(src, dst, true)?;
+    copy_dir(src, dst, true, only)?;
+    if let Some(dir) = only {
+        only_profile(&dst.join("Local State"), dir)?;
+    }
     // Chromium marks a profile as crashed while it has it open, and offers to restore the
     // tabs of a copy made then.
     for entry in fs::read_dir(dst)?.flatten() {
@@ -313,6 +335,24 @@ fn copy_profile(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Makes Chromium's `Local State` list only the profile in `dir`, so that a copy's profile
+/// menu doesn't offer the profiles it left out.
+fn only_profile(state: &Path, dir: &str) -> io::Result<()> {
+    let Ok(text) = fs::read(state) else { return Ok(()) };
+    let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&text) else { return Ok(()) };
+    let Some(p) = json.get_mut("profile").and_then(|p| p.as_object_mut()) else { return Ok(()) };
+    if let Some(cache) = p.get_mut("info_cache").and_then(|c| c.as_object_mut()) {
+        cache.retain(|d, _| d == dir);
+    }
+    for key in ["last_active_profiles", "profiles_order"] {
+        if let Some(list) = p.get_mut(key).and_then(|l| l.as_array_mut()) {
+            list.retain(|d| d == dir);
+        }
+    }
+    p.insert("last_used".into(), dir.into());
+    fs::write(state, serde_json::to_vec(&json)?)
 }
 
 /// Whether a Chromium or Firefox browser has the profile open.
@@ -339,14 +379,14 @@ pub fn created_by_rembro(profile: &Path) -> bool {
 
 /// The target of the running rembro session that has this profile open, if there is one.
 pub fn session_target(profile: &Path) -> Option<String> {
-    let text = fs::read_to_string(profile.join(SESSION)).ok()?;
+    let text = fs::read_to_string(session_path(profile)?).ok()?;
     let (pid, target) = text.split_once('\n')?;
     sys::process_name(pid.trim().parse().ok()?)?.contains("rembro").then(|| target.trim().to_string())
 }
 
 /// Records that this rembro session has the profile open, until dropped.
 pub struct SessionMark {
-    path: PathBuf,
+    path: Option<PathBuf>,
     /// Dropped after `path` is removed, which lets the next session in.
     _lock: Option<File>,
 }
@@ -366,8 +406,10 @@ impl SessionMark {
             // A file system without locks, or a lock file that can't be opened: go on without one.
             _ => None,
         };
-        let path = profile.join(SESSION);
-        let _ = fs::write(&path, format!("{}\n{target}\n", std::process::id()));
+        let path = session_path(profile);
+        if let Some(p) = &path {
+            let _ = fs::write(p, format!("{}\n{target}\n", std::process::id()));
+        }
         Some(SessionMark { path, _lock: lock })
     }
 }
@@ -379,17 +421,33 @@ fn lock_path(profile: &Path) -> Option<PathBuf> {
     if created_by_rembro(profile) {
         return Some(profile.join(LOCK));
     }
+    let path = beside_lock(profile, "lock")?;
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    Some(path)
+}
+
+/// The file that names the session that has the profile open. For a profile that rembro did
+/// not create it goes next to the lock, so that rembro puts none of its files there.
+fn session_path(profile: &Path) -> Option<PathBuf> {
+    if created_by_rembro(profile) { Some(profile.join(SESSION)) } else { beside_lock(profile, "session") }
+}
+
+/// A file in rembro's own directory for a profile that rembro did not create, named after the
+/// profile's path.
+fn beside_lock(profile: &Path, extension: &str) -> Option<PathBuf> {
     let profile = fs::canonicalize(profile).unwrap_or_else(|_| profile.to_path_buf());
-    let name = format!("{:016x}.lock", util::fnv64(profile.to_string_lossy().as_bytes()));
-    let dir = util::data_dir().join("rembro/locks");
-    let _ = fs::create_dir_all(&dir);
-    let path = dir.join(name);
+    let name = format!("{:016x}.{extension}", util::fnv64(profile.to_string_lossy().as_bytes()));
+    let path = util::data_dir().join("rembro/locks").join(name);
     path.is_absolute().then_some(path)
 }
 
 impl Drop for SessionMark {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if let Some(path) = &self.path {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 
@@ -485,6 +543,230 @@ impl Drop for Untrust {
 /// Where rembro keeps profiles on this machine, as TARGET/BROWSER/NAME.
 pub fn kept_dir() -> PathBuf {
     util::data_dir().join("rembro/profiles")
+}
+
+/// Whether a --profile or --fork value names one of the browser's own profiles: `system` for
+/// its default one, or `system:NAME`. Returns the NAME.
+pub fn system_name(value: &str) -> Option<Option<&str>> {
+    if value == "system" {
+        return Some(None);
+    }
+    value.strip_prefix("system:").map(|name| (!name.is_empty()).then_some(name))
+}
+
+/// Refuses a name for a profile that rembro keeps that would make its directory `system`,
+/// which names the browser's own profiles.
+pub fn check_name(name: &str) -> Result<(), String> {
+    if util::slug(name).eq_ignore_ascii_case("system") {
+        return Err(format!(
+            "rembro can't keep a profile named {name:?}, because system means the browser's own profiles; choose \
+             another name"
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses `system` when an earlier rembro kept a profile by that name at `kept`, which may
+/// be the profile that was meant.
+pub fn check_kept_system(kept: &Path) -> Result<(), String> {
+    if kept.is_dir() {
+        return Err(format!(
+            "system now means the browser's own profile, but rembro kept a profile named system at {}. Rename that \
+             directory to use it by another name",
+            kept.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses --debug with the browser's own profile when the browser opens no debugging port on
+/// its own data directory.
+pub fn check_debug(arg: &ProfileArg, browser: &Resolved) -> Result<(), String> {
+    match arg {
+        ProfileArg::Kept(p)
+            if system_name(p).is_some() && !browser::debugs_own_profile(&browser.name, &browser.path) =>
+        {
+            Err(format!(
+                "{} opens no debugging port on its own data directory, so --debug can't work with --profile {p} (see \
+                 https://developer.chrome.com/blog/remote-debugging-port); use --fork {p} to start from a copy of it",
+                browser.name
+            ))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// One of a browser's own profiles.
+#[derive(Debug)]
+pub struct Own {
+    /// Chromium's user data directory, or the Firefox profile.
+    pub path: PathBuf,
+    /// For Chromium, the profile's directory in `path`, such as `Default` or `Profile 1`.
+    pub directory: Option<String>,
+    /// The name the browser shows for it.
+    pub name: String,
+    /// The browser starts with it unless told otherwise.
+    pub default: bool,
+}
+
+impl Own {
+    /// The directory that holds the profile's data.
+    fn dir(&self) -> PathBuf {
+        self.directory.as_ref().map_or_else(|| self.path.clone(), |d| self.path.join(d))
+    }
+
+    fn dir_name(&self) -> String {
+        match &self.directory {
+            Some(d) => d.clone(),
+            None => self.path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+        }
+    }
+}
+
+/// Finds the browser's own profile called `name`, or its default one, in the first of the
+/// directories where the browser keeps them that has any.
+pub fn find_own(browser: &Resolved, name: Option<&str>, os: Os, home: Option<&str>) -> Result<Own, String> {
+    let dirs = browser::own_profile_dirs(&browser.name, &browser.path, os, home, &|k| std::env::var(k).ok())
+        .ok_or_else(|| {
+            format!(
+                "--profile system works with {}, not {}; for another browser, give its profile's directory with \
+                 --profile PATH",
+                browser::OWN_NAMES,
+                browser.name
+            )
+        })?;
+    let Some((root, profiles)) =
+        dirs.iter().find_map(|d| list_own(d, browser.family).filter(|p| !p.is_empty()).map(|p| (d, p)))
+    else {
+        let places: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+        return Err(format!("found no profiles of {}'s own in {}", browser.name, places.join(", ")));
+    };
+    pick(profiles, name, &browser.name, root)
+}
+
+/// The profile called `name`, ignoring case, or else the one in the directory of that name, or
+/// with no name, the default one.
+fn pick(mut profiles: Vec<Own>, name: Option<&str>, browser: &str, root: &Path) -> Result<Own, String> {
+    let list = |profiles: &[Own]| {
+        profiles.iter().map(|p| format!("{:?} ({})", p.name, p.dir_name())).collect::<Vec<_>>().join(", ")
+    };
+    let Some(want) = name else {
+        return match profiles.iter().position(|p| p.default) {
+            Some(i) => Ok(profiles.swap_remove(i)),
+            None => Err(format!(
+                "{browser} has no default profile in {}; choose one of {} with system:NAME",
+                root.display(),
+                list(&profiles)
+            )),
+        };
+    };
+    let matching = |key: &dyn Fn(&Own) -> String| -> Vec<usize> {
+        let all: Vec<usize> =
+            (0..profiles.len()).filter(|&i| key(&profiles[i]).to_lowercase() == want.to_lowercase()).collect();
+        let exact: Vec<usize> = all.iter().copied().filter(|&i| key(&profiles[i]) == want).collect();
+        if all.len() > 1 && exact.len() == 1 { exact } else { all }
+    };
+    let mut found = matching(&|p| p.name.clone());
+    if found.is_empty() {
+        found = matching(&|p| p.dir_name());
+    }
+    match found[..] {
+        [i] => Ok(profiles.swap_remove(i)),
+        [] => Err(format!(
+            "{browser} has no profile called {want:?} in {}; its profiles are {}",
+            root.display(),
+            list(&profiles)
+        )),
+        _ => {
+            let dirs: Vec<String> = found.iter().map(|&i| format!("system:{}", profiles[i].dir_name())).collect();
+            Err(format!(
+                "{browser} has {} profiles called {want:?} in {}; choose one by its directory: {}",
+                found.len(),
+                root.display(),
+                dirs.join(", ")
+            ))
+        }
+    }
+}
+
+/// The browser's own profiles in `root`, Chromium's user data directory or the directory with
+/// Firefox's profiles.ini, or None if `root` has neither `Local State` nor `profiles.ini`.
+fn list_own(root: &Path, family: Family) -> Option<Vec<Own>> {
+    match family {
+        Family::Chromium => chromium_profiles(root),
+        Family::Firefox => firefox_profiles(root),
+        _ => None,
+    }
+}
+
+/// The profiles in Chromium's `Local State`. The default one is the one used last, or else
+/// `Default`.
+fn chromium_profiles(root: &Path) -> Option<Vec<Own>> {
+    let state: serde_json::Value = serde_json::from_slice(&fs::read(root.join("Local State")).ok()?).ok()?;
+    let info = &state["profile"];
+    let mut dirs: Vec<(String, String)> = match info["info_cache"].as_object() {
+        Some(cache) => cache
+            .iter()
+            .map(|(d, v)| (d.clone(), v["name"].as_str().filter(|n| !n.is_empty()).unwrap_or(d).to_string()))
+            .collect(),
+        None => vec![("Default".into(), "Default".into())],
+    };
+    dirs.retain(|(d, _)| root.join(d).is_dir());
+    dirs.sort_by(|a, b| util::natural_cmp(&a.0, &b.0));
+    let last = info["last_used"].as_str().filter(|d| dirs.iter().any(|(x, _)| x == d)).unwrap_or("Default");
+    let own = |(d, name): (String, String)| Own { path: root.into(), default: d == last, directory: Some(d), name };
+    Some(dirs.into_iter().map(own).collect())
+}
+
+/// The profiles in Firefox's profiles.ini. The default one is the one that the first
+/// installation of Firefox uses, or else the one marked as the default.
+fn firefox_profiles(root: &Path) -> Option<Vec<Own>> {
+    let text = fs::read_to_string(root.join("profiles.ini")).ok()?;
+    let sections = ini(text.trim_start_matches('\u{feff}'));
+    let get = |keys: &[(&str, &str)], key: &str| keys.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string());
+    let install = sections
+        .iter()
+        .find(|(s, _)| s.starts_with("Install"))
+        .and_then(|(_, keys)| get(keys, "Default"))
+        .map(|p| root.join(p));
+    let mut found: Vec<(Own, bool)> = sections
+        .iter()
+        .filter(|(s, _)| {
+            s.strip_prefix("Profile").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .filter_map(|(_, keys)| {
+            // A path that is not relative replaces `root`.
+            let path = root.join(get(keys, "Path")?);
+            let name =
+                get(keys, "Name").unwrap_or_else(|| path.file_name().unwrap_or_default().to_string_lossy().into());
+            Some((Own { path, directory: None, name, default: false }, get(keys, "Default").as_deref() == Some("1")))
+        })
+        .filter(|(o, _)| o.path.is_dir())
+        .collect();
+    let default = install
+        .and_then(|d| found.iter().position(|(o, _)| o.path == d))
+        .or_else(|| found.iter().position(|(_, marked)| *marked))
+        .or_else(|| (found.len() == 1).then_some(0));
+    if let Some(i) = default {
+        found[i].0.default = true;
+    }
+    Some(found.into_iter().map(|(o, _)| o).collect())
+}
+
+/// The sections of an INI file in order, with their keys and values.
+fn ini(text: &str) -> Vec<(&str, Vec<(&str, &str)>)> {
+    let mut sections: Vec<(&str, Vec<(&str, &str)>)> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            sections.push((name, Vec::new()));
+        } else if !line.starts_with([';', '#'])
+            && let Some((key, value)) = line.split_once('=')
+            && let Some((_, keys)) = sections.last_mut()
+        {
+            keys.push((key.trim(), value.trim()));
+        }
+    }
+    sections
 }
 
 /// A profile that `rembro profiles` lists.
@@ -598,6 +880,16 @@ fn find(dir: &Path, temp: &Path) -> (Vec<Found>, Vec<Found>) {
     (kept, left)
 }
 
+/// The browsers' own profiles on this machine, with the directory that holds each browser's.
+fn find_own_here() -> Vec<(&'static str, PathBuf, Vec<Own>)> {
+    browser::own_profile_dirs_here()
+        .into_iter()
+        .filter_map(|(name, family, dirs)| {
+            dirs.into_iter().find_map(|d| list_own(&d, family).filter(|p| !p.is_empty()).map(|p| (name, d, p)))
+        })
+        .collect()
+}
+
 fn size(bytes: u64) -> String {
     let mut n = bytes as f64;
     let mut unit = 0;
@@ -676,6 +968,28 @@ pub fn command(p: &Profiles) -> Result<i32, String> {
         }
         for f in &left {
             row(f, "");
+        }
+        for (browser, root, profiles) in find_own_here() {
+            println!("{browser}'s own profiles in {}:", root.display());
+            for o in &profiles {
+                let alike = profiles.iter().filter(|p| p.name.to_lowercase() == o.name.to_lowercase()).count();
+                let dir = o.dir();
+                let f = Found {
+                    name: format!("system:{}", if alike == 1 { o.name.clone() } else { o.dir_name() }),
+                    size: dir_size(&dir),
+                    used: last_used(&dir),
+                    open: is_open(&o.path),
+                    ours: false,
+                    path: dir,
+                };
+                let note = match (o.default, f.open) {
+                    (true, true) => "  (default, open)",
+                    (true, false) => "  (default)",
+                    (false, true) => "  (open)",
+                    (false, false) => "",
+                };
+                row(&f, note);
+            }
         }
         return Ok(0);
     };
@@ -772,14 +1086,14 @@ mod tests {
         assert!(path.join(OWNER).exists());
         assert!(is_open(&path));
         // Another session waits for the first one's browser, and finds the profile open.
-        let second = claim_within(&path, Family::Chromium, "sbx:qut", Duration::from_millis(300)).unwrap();
+        let second = claim_within(&path, Family::Chromium, "sbx:qut", Duration::from_millis(300), true).unwrap();
         assert!(second.busy && second.mark.is_none());
         // It takes the profile if the first session ends while it waits.
         let release = thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
             drop(first);
         });
-        let third = claim_within(&path, Family::Chromium, "sbx:qut", Duration::from_secs(5)).unwrap();
+        let third = claim_within(&path, Family::Chromium, "sbx:qut", Duration::from_secs(5), true).unwrap();
         assert!(!third.busy && third.mark.is_some());
         release.join().unwrap();
         drop(third);
@@ -809,7 +1123,7 @@ mod tests {
         let month_ago = SystemTime::now() - Duration::from_secs(30 * 86400);
         set_dir_modified(&src, month_ago).unwrap();
 
-        let fork = create_temp(&dir, Some(&src), "sbx:qut").unwrap();
+        let fork = create_temp(&dir, Some(&src), None, "sbx:qut").unwrap();
         assert!(!fork.busy && fork.mark.is_some());
         assert!(fork.path.file_name().unwrap().to_string_lossy().starts_with(TEMP_PREFIX));
         assert_eq!(fs::read_to_string(fork.path.join("Default/Cookies")).unwrap(), "cookies");
@@ -824,7 +1138,7 @@ mod tests {
         assert!(is_open(&fork.path));
         // Forking counts as using the source.
         assert_eq!(days_between(last_used(&src), SystemTime::now()), 0);
-        assert!(create_temp(&dir, Some(&dir.join("missing")), "sbx:qut").is_err());
+        assert!(create_temp(&dir, Some(&dir.join("missing")), None, "sbx:qut").is_err());
         drop(open);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -884,10 +1198,10 @@ mod tests {
         fs::create_dir_all(unmarked.join("storage")).unwrap();
         fs::write(unmarked.join("prefs.js"), "").unwrap();
         fs::create_dir_all(dir.join("sbx-qut/chromium/.gone.rembro-deleting-1")).unwrap();
-        let left = create_temp(&temp, None, "sbx:qut").unwrap();
+        let left = create_temp(&temp, None, None, "sbx:qut").unwrap();
         let left_path = left.path.clone();
         drop(left);
-        let running = create_temp(&temp, None, "sbx:qut").unwrap();
+        let running = create_temp(&temp, None, None, "sbx:qut").unwrap();
         // A `rembro run` that is still going, and one that was killed.
         let run_dir = |held: bool| {
             let d = util::mkdtemp(&temp, RUN_PREFIX).unwrap();
@@ -921,6 +1235,107 @@ mod tests {
         assert!(open.exists() && copied.exists() && unmarked.exists() && running.path.exists());
         assert!(!left_path.exists() && !dead_run.exists() && live_run.exists());
         drop(running);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn system_names() {
+        assert_eq!(system_name("system"), Some(None));
+        assert_eq!(system_name("system:Work"), Some(Some("Work")));
+        assert_eq!(system_name("system:Profile 1/x"), Some(Some("Profile 1/x")));
+        assert_eq!(system_name("system:"), Some(None));
+        assert_eq!(system_name("systemd"), None);
+        assert_eq!(system_name("work"), None);
+        assert!(check_name("System").is_err() && check_name("system.").is_err() && check_name("SYSTEM").is_err());
+        assert!(check_name("systemd").is_ok() && check_name("work").is_ok());
+        let browser =
+            |name: &str, path: &str| Resolved { name: name.into(), family: Family::Chromium, path: path.into() };
+        let chrome = browser("chrome", "/usr/bin/google-chrome-stable");
+        let err = check_debug(&ProfileArg::Kept("system".into()), &chrome).unwrap_err();
+        assert!(err.contains("--fork system"), "{err}");
+        assert!(check_debug(&ProfileArg::Kept("system:Work".into()), &chrome).is_err());
+        assert!(check_debug(&ProfileArg::Fork("system".into()), &chrome).is_ok());
+        assert!(check_debug(&ProfileArg::Kept("work".into()), &chrome).is_ok());
+        assert!(check_debug(&ProfileArg::Kept("system".into()), &browser("chromium", "/usr/bin/chromium")).is_ok());
+    }
+
+    #[test]
+    fn own_profiles() {
+        let root = util::mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
+        let chromium = root.join("chromium");
+        for d in ["Default", "Profile 1", "Profile 2/Cache"] {
+            fs::create_dir_all(chromium.join(d)).unwrap();
+        }
+        let state = r#"{"profile":{"info_cache":{"Default":{"name":"Work"},"Profile 1":{"name":"Home"},
+            "Profile 2":{"name":"home"},"Profile 3":{"name":"Deleted"}},"last_used":"Profile 1",
+            "profiles_order":["Default","Profile 1","Profile 2"]},"os_crypt":{"encrypted_key":"k"}}"#;
+        fs::write(chromium.join("Local State"), state).unwrap();
+        let list = || chromium_profiles(&chromium).unwrap();
+        let dirs: Vec<String> = list().iter().map(|p| p.dir_name()).collect();
+        assert_eq!(dirs, ["Default", "Profile 1", "Profile 2"]);
+        let pick = |list: Vec<Own>, name| pick(list, name, "chromium", &root);
+        let found = pick(list(), None).unwrap();
+        assert_eq!((found.path.as_path(), found.directory.as_deref()), (chromium.as_path(), Some("Profile 1")));
+        assert_eq!(pick(list(), Some("work")).unwrap().directory.as_deref(), Some("Default"));
+        // Of two names that differ only in case, the exact one wins, and otherwise neither does.
+        assert_eq!(pick(list(), Some("Home")).unwrap().directory.as_deref(), Some("Profile 1"));
+        let err = pick(list(), Some("HOME")).unwrap_err();
+        assert!(err.contains("system:Profile 1, system:Profile 2"), "{err}");
+        assert_eq!(pick(list(), Some("profile 2")).unwrap().name, "home");
+        let err = pick(list(), Some("Deleted")).unwrap_err();
+        assert!(err.contains(r#""Work" (Default), "Home" (Profile 1)"#), "{err}");
+        fs::write(chromium.join("Local State"), r#"{"profile":{"info_cache":{"Default":{},"Profile 1":{}}}}"#).unwrap();
+        assert_eq!(pick(list(), None).unwrap().name, "Default");
+
+        let firefox = root.join("firefox");
+        let elsewhere = root.join("elsewhere");
+        for d in [firefox.join("a1.default"), firefox.join("b2.default-release"), elsewhere.clone()] {
+            fs::create_dir_all(d).unwrap();
+        }
+        let ini = |install: &str| {
+            let text = format!(
+                "{install}[Profile1]\nName=default\nIsRelative=1\nPath=a1.default\nDefault=1\n\n\
+                 [Profile0]\nName=default-release\nIsRelative=1\nPath=b2.default-release\n\n\
+                 [Profile2]\nName=Other\nIsRelative=0\nPath={}\n\n[Profile3]\nName=gone\nIsRelative=1\nPath=c3.gone\n\n\
+                 ; a comment\n[General]\nStartWithLastProfile=1\nVersion=2\n",
+                elsewhere.display()
+            );
+            fs::write(firefox.join("profiles.ini"), text).unwrap();
+            firefox_profiles(&firefox).unwrap()
+        };
+        let pick = |list: Vec<Own>, name| super::pick(list, name, "firefox", &root);
+        let list = ini("[Install4F96D1932A9F858E]\nDefault=b2.default-release\nLocked=1\n\n");
+        assert_eq!(list.len(), 3);
+        assert_eq!(pick(list, None).unwrap().path, firefox.join("b2.default-release"));
+        let list = ini("");
+        assert_eq!(pick(list, None).unwrap().path, firefox.join("a1.default"));
+        assert_eq!(pick(ini(""), Some("OTHER")).unwrap().path, elsewhere);
+        assert_eq!(pick(ini(""), Some("b2.default-release")).unwrap().name, "default-release");
+        assert!(chromium_profiles(&root).is_none() && firefox_profiles(&root).is_none());
+
+        // A fork of one of Chromium's profiles copies that profile and Local State, and nothing else.
+        fs::write(chromium.join("Local State"), state).unwrap();
+        fs::write(chromium.join("Profile 2/Cookies"), "cookies").unwrap();
+        fs::write(chromium.join("Last Version"), "1").unwrap();
+        let entries =
+            || fs::read_dir(&chromium).unwrap().map(|e| e.unwrap().path()).collect::<std::collections::BTreeSet<_>>();
+        let before = entries();
+        let fork = create_temp(&root, Some(&chromium), Some("Profile 2"), "sbx:qut").unwrap();
+        assert_eq!(fork.directory.as_deref(), Some("Profile 2"));
+        assert_eq!(fs::read_to_string(fork.path.join("Profile 2/Cookies")).unwrap(), "cookies");
+        assert!(!fork.path.join("Profile 2/Cache").exists());
+        assert!(!fork.path.join("Default").exists() && !fork.path.join("Last Version").exists());
+        let copy: serde_json::Value =
+            serde_json::from_slice(&fs::read(fork.path.join("Local State")).unwrap()).unwrap();
+        let cached: Vec<&String> = copy["profile"]["info_cache"].as_object().unwrap().keys().collect();
+        assert_eq!(cached, ["Profile 2"]);
+        assert_eq!(copy["profile"]["last_used"], "Profile 2");
+        assert_eq!(copy["profile"]["profiles_order"], serde_json::json!(["Profile 2"]));
+        assert_eq!(copy["os_crypt"]["encrypted_key"], "k");
+        // The browser's own directory is as it was.
+        assert_eq!(before, entries());
+        assert!(create_temp(&root, Some(&chromium), Some("Profile 9"), "sbx:qut").is_err());
+        drop(fork);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::browser::Family;
 
 /// Bumped whenever a message changes shape, so mismatched builds fail clearly.
-pub const PROTOCOL: u32 = 5;
+pub const PROTOCOL: u32 = 6;
 
 /// A request from rembro to the agent. Each one gets exactly one reply.
 #[derive(Serialize, Deserialize, Debug)]
@@ -70,11 +70,17 @@ pub enum Call {
         timeout_ms: u64,
     },
     /// Creates a browser profile, or claims one that exists, and marks it as this session's
-    /// until the agent exits. Returns its path, and whether a browser already has it open.
+    /// until the agent exits. Returns an `Opened`.
     Profile {
         profile: ProfileSpec,
         family: Family,
         target: String,
+    },
+    /// Saves the user.js and the prefs named in `keys` of a Firefox profile that rembro did not
+    /// create, before rembro changes them, and puts them back when the agent exits.
+    SaveFirefox {
+        path: String,
+        keys: Vec<String>,
     },
 }
 
@@ -85,6 +91,20 @@ pub enum ProfileSpec {
     Kept { path: String },
     /// A new profile, deleted when the agent exits, that starts as a copy of `fork` if given.
     Temp { fork: Option<String> },
+    /// One of the browser's own profiles: the one called `name`, or its default one. With
+    /// `fork`, a new profile that starts as a copy of it, as with `Temp`. `browser` is the
+    /// browser's name, and `exe` its executable.
+    System { browser: String, exe: String, name: Option<String>, fork: bool },
+}
+
+/// The profile that a `Call::Profile` gives the session.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Opened {
+    pub path: String,
+    /// A browser already has it open.
+    pub busy: bool,
+    /// For one of Chromium's own profiles, its directory in `path`, such as `Profile 1`.
+    pub directory: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

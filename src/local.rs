@@ -31,16 +31,25 @@ fn profile_dir(
     s: &Session,
     browser: &browser::Resolved,
 ) -> Result<(profile::Claimed, Option<profile::Discard>), String> {
-    let path_of = |p: &str| {
+    let kept = |name: &str| profile::kept_dir().join(s.target.slug()).join(&browser.name).join(util::slug(name));
+    let path_of = |p: &str| -> Result<PathBuf, String> {
         if util::is_path(p) {
-            util::expand_home(p, util::home().as_deref())
+            Ok(util::expand_home(p, util::home().as_deref()))
         } else {
-            profile::kept_dir().join(s.target.slug()).join(&browser.name).join(util::slug(p))
+            profile::check_name(p)?;
+            Ok(kept(p))
         }
+    };
+    let own = |name: Option<&str>| {
+        profile::check_kept_system(&kept("system"))?;
+        profile::find_own(browser, name, browser::Os::HERE, util::home().as_deref())
     };
     let (fork, open) = match cli.profile_arg() {
         ProfileArg::Kept(p) => {
-            let path = path_of(&p);
+            if let Some(name) = profile::system_name(&p) {
+                return Ok((profile::claim_own(&own(name)?, browser.family, &s.label)?, None));
+            }
+            let path = path_of(&p)?;
             if !profile::is_run_profile(&path) {
                 let claimed = profile::claim(&path, browser.family, &s.label)?;
                 if !util::is_path(&p) {
@@ -63,7 +72,20 @@ fn profile_dir(
         }
         ProfileArg::Temp => (None, false),
         ProfileArg::Fork(p) => {
-            let src = path_of(&p);
+            let (src, directory) = match profile::system_name(&p) {
+                Some(name) => {
+                    let own = own(name)?;
+                    if cfg!(windows) && matches!(browser.name.as_str(), "chrome" | "edge" | "brave") {
+                        eprintln!(
+                            "rembro: on Windows, {} decrypts the cookies it protects with App-Bound Encryption only in \
+                             its own data directory, so this copy may start signed out of sites",
+                            browser.name
+                        );
+                    }
+                    (own.path, own.directory)
+                }
+                None => (path_of(&p)?, None),
+            };
             if !util::is_path(&p) && !src.is_dir() {
                 return Err(format!(
                     "there is no {p} profile for {} in {}; `rembro profiles` lists the profiles there are",
@@ -76,10 +98,14 @@ fn profile_dir(
                     "rembro: {p} is open in another window, so this browser starts from what that one last saved"
                 );
             }
-            (Some(src), open)
+            (Some((src, directory)), open)
         }
     };
-    let claimed = profile::create_temp(&std::env::temp_dir(), fork.as_deref(), &s.label).map_err(|e| {
+    let (fork, directory) = match &fork {
+        Some((src, directory)) => (Some(src.as_path()), directory.as_deref()),
+        None => (None, None),
+    };
+    let claimed = profile::create_temp(&std::env::temp_dir(), fork, directory, &s.label).map_err(|e| {
         // On Windows, Chromium doesn't let other programs read its cookies while it runs.
         if open { format!("{e}. Close the browser that has it open, and try again") } else { e }
     })?;
@@ -207,6 +233,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if debug.is_some() && browser::debug_endpoint(browser.family, 0).is_none() {
         return Err(format!("--debug needs a Chromium or Firefox browser, not {}", browser.name));
     }
+    if debug.is_some() {
+        profile::check_debug(&b.profile_arg(), &browser)?;
+    }
     if debug.is_some() && s.target != Target::Local {
         eprintln!(
             "rembro: the browser runs on this machine, so programs in {} that drive it can read files it can open \
@@ -223,6 +252,14 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     let profile = claimed.path;
     let busy = claimed.busy;
     let _session = claimed.mark;
+    let directory = claimed.directory;
+    // The CA certificates go into the Default profile's store.
+    if b.trust_target_ca && directory.as_deref().is_some_and(|d| d != "Default") {
+        return Err(format!(
+            "--trust-target-ca works only with Chromium's Default profile, and this one is in {}",
+            directory.unwrap_or_default()
+        ));
+    }
     let temporary = discard.is_some();
     // Declared after the mark, so that the profile goes before the next session can take it.
     let _discard = discard;
@@ -259,7 +296,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if !busy && let Err(e) = profile::restore(&profile) {
         eprintln!("rembro: could not put back the settings an earlier session changed: {e}");
     }
-    if browser.family == Family::Firefox && !owned && !busy && !b.force_profile {
+    // Asking for the browser's own profile is asking for rembro to change it and put it back.
+    let own = matches!(b.profile_arg(), ProfileArg::Kept(p) if profile::system_name(&p).is_some());
+    if browser.family == Family::Firefox && !owned && !busy && !b.force_profile && !own {
         return Err(format!(
             "{} is a Firefox profile that rembro did not create. rembro's proxy settings would stay in it, and \
              Firefox started on its own would then use a proxy that no longer exists. Pass --force-profile to use it \
@@ -302,6 +341,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         browser::launch(&Plan {
             browser: &browser,
             profile: &profile_str,
+            profile_directory: directory.as_deref(),
             net: Net::Proxy { socks_port, loopback_only: b.loopback_only },
             gui: if b.headless { Gui::Headless } else { Gui::Host },
             debug_port: if first { host_debug } else { None },

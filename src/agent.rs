@@ -21,8 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::browser::{Os, Resolved};
 use crate::mux::{Handler, Mux, Sock};
-use crate::proto::{Addr, Call, Event, Info, Open, PROTOCOL, ProfileSpec};
+use crate::proto::{Addr, Call, Event, Info, Open, Opened, PROTOCOL, ProfileSpec};
 use crate::{profile, sys, util};
 
 pub fn self_hash() -> io::Result<String> {
@@ -63,6 +64,7 @@ pub fn main(args: &[String]) -> ! {
         dirs: Mutex::new(Vec::new()),
         files: Mutex::new(Vec::new()),
         marks: Mutex::new(Vec::new()),
+        restores: Mutex::new(Vec::new()),
         ports: Mutex::new(HashMap::new()),
         shim: Mutex::new(None),
         next_proc: AtomicU32::new(1),
@@ -87,6 +89,8 @@ struct Agent {
     files: Mutex<Vec<PathBuf>>,
     /// Browser profiles this session has open.
     marks: Mutex<Vec<profile::SessionMark>>,
+    /// Put back the settings of Firefox profiles that rembro did not create, once their browser has exited.
+    restores: Mutex<Vec<profile::Restore>>,
     /// Debugging ports this session has reserved, by `Call::PortFree` or by listening on them.
     ports: Mutex<HashMap<u16, Option<PortLock>>>,
     /// The directory with the BROWSER and xdg-open commands, once `Call::Shim` set them up.
@@ -129,6 +133,7 @@ impl Agent {
         for f in self.files.lock().unwrap().iter() {
             let _ = fs::remove_file(f);
         }
+        self.restores.lock().unwrap().clear();
         self.marks.lock().unwrap().clear();
         self.ports.lock().unwrap().clear();
     }
@@ -290,13 +295,45 @@ impl Agent {
                     ProfileSpec::Kept { path } => profile::claim(&self.path(&path)?, family, &target)?,
                     ProfileSpec::Temp { fork } => {
                         let fork = fork.map(|f| self.path(&f)).transpose()?;
-                        let claimed = profile::create_temp(&std::env::temp_dir(), fork.as_deref(), &target)?;
+                        let claimed = profile::create_temp(&std::env::temp_dir(), fork.as_deref(), None, &target)?;
                         self.dirs.lock().unwrap().push(claimed.path.clone());
                         claimed
                     }
+                    ProfileSpec::System { browser, exe, name, fork } => {
+                        let kept = format!("~/.local/share/rembro/profiles/{browser}/system");
+                        profile::check_kept_system(&self.path(&kept)?)?;
+                        let browser = Resolved { name: browser, family, path: exe };
+                        let own = profile::find_own(&browser, name.as_deref(), Os::Linux, self.home().as_deref())?;
+                        if fork {
+                            let temp = std::env::temp_dir();
+                            let claimed =
+                                profile::create_temp(&temp, Some(&own.path), own.directory.as_deref(), &target)?;
+                            self.dirs.lock().unwrap().push(claimed.path.clone());
+                            claimed
+                        } else {
+                            let claimed = profile::claim_own(&own, family, &target)?;
+                            if !claimed.busy
+                                && let Err(e) = profile::restore(&claimed.path)
+                            {
+                                eprintln!(
+                                    "rembro agent: could not put back the settings an earlier session changed: {e}"
+                                );
+                            }
+                            claimed
+                        }
+                    }
                 };
                 self.marks.lock().unwrap().extend(claimed.mark);
-                json!((claimed.path.to_string_lossy(), claimed.busy))
+                json!(Opened {
+                    path: claimed.path.to_string_lossy().into_owned(),
+                    busy: claimed.busy,
+                    directory: claimed.directory,
+                })
+            }
+            Call::SaveFirefox { path, keys } => {
+                let restore = profile::save_firefox(&self.path(&path)?, &keys)?;
+                self.restores.lock().unwrap().push(restore);
+                Value::Null
             }
         })
     }

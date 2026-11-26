@@ -98,28 +98,58 @@ rembro never uses your regular browser profile unless you ask it to. Each sessio
 
 - `--profile NAME` keeps the profile, and the next session with the same name, target and browser gets it back. `REMBRO_PROFILE=NAME` does the same for every session without `--debug`, and `--temp-profile` gives one session a new profile anyway.
 - `--profile PATH` uses any directory as the profile. rembro treats a value as a path when it contains `/` (or on Windows, `\`) or is `~`.
-- `--fork NAME` or `--fork PATH` starts from a copy of a profile, and deletes the copy when the browser exits. Log in once with `--profile work`, then run as many `--fork work` sessions as you like, at the same time, without changing `work`. The copy leaves out caches and the profile's locks. A fork of a profile that is open in another window has what that browser last saved to disk.
+- `--profile system` uses the browser's own default profile, the one it opens when you start it yourself, and `--profile system:NAME` uses its profile called NAME ([The browser's own profiles](#the-browsers-own-profiles)). rembro can't keep a profile of its own named `system`.
+- `--fork NAME`, `--fork PATH` or `--fork system[:NAME]` starts from a copy of a profile, and deletes the copy when the browser exits. Log in once with `--profile work`, then run as many `--fork work` sessions as you like, at the same time, without changing `work`. The copy leaves out caches and the profile's locks. A fork of a profile that is open in another window has what that browser last saved to disk.
 
 rembro keeps named profiles in `~/.local/share/rembro/profiles/TARGET/BROWSER/NAME` on this machine (under `$XDG_DATA_HOME` if you set it), where TARGET is the target written as a directory name, such as `sbx-myapp`. On macOS they live in `~/Library/Application Support/rembro/profiles`, and on Windows in `%LOCALAPPDATA%\rembro\profiles`. With `--remote` they live in `~/.local/share/rembro/profiles/BROWSER/NAME` in the target. Temporary profiles are `rembro-profile-XXXXXX` directories in the system's temporary directory, here or in the target. The links that a program under `rembro run` opens share one, in a private `rembro-run-XXXXXX` directory there. rembro 0.2 and earlier kept every session's data in a profile named `default`, or `agent` with `--debug`, and `--profile default` and `--profile agent` still open those.
 
 Chromium downloads over 100 MB of optional components into a profile, such as the Widevine DRM module and certificate revocation lists. rembro starts it with `--disable-component-update` in temporary profiles, so that it doesn't download them again for each session.
 
-To start from your regular logins without touching them, fork your regular profile, for example `rembro --fork ~/.config/chromium sbx:myapp`.
+To start from your regular logins without touching them, fork your browser's own profile: `rembro --fork system sbx:myapp`.
 
 When a profile you chose with `--profile` is already open in another rembro window for the same target, the URLs open in that window, and the new rembro exits. A Chromium with a debugging endpoint gets them through it, which is the only way a headless one takes them. When the other rembro is still starting its browser, the new one waits up to 30 seconds for it.
 
-When the browser runs here, rembro refuses two uses of `--profile PATH` that would go wrong, unless you add `--force-profile`:
+When the browser runs here, rembro refuses two uses of `--profile PATH` or `--profile system` that would go wrong, unless you add `--force-profile`:
 
 - The profile is open in a browser that rembro did not start, or in a rembro session for another target. The browser would hand the pages to that window, which uses a different network. With `--force-profile`, the pages open there anyway.
-- The profile is a Firefox profile that rembro did not create. rembro configures Firefox through prefs in `user.js`, which Firefox copies into `prefs.js`, so Firefox started on its own afterwards would use a proxy that no longer exists. With `--force-profile`, rembro saves the profile's `user.js` and the prefs it changes, and puts them back when the browser exits. If rembro is killed first, the next rembro launch with that profile puts them back.
+- The profile is a Firefox profile that rembro did not create, given as a path. rembro configures Firefox through prefs in `user.js`, which Firefox copies into `prefs.js`, so Firefox started on its own afterwards would use a proxy that no longer exists. With `--force-profile`, rembro saves the profile's `user.js` and the prefs it changes, and puts them back when the browser exits. If rembro is killed first, the next rembro launch with that profile puts them back. `--profile system` asks for this already, so it needs no `--force-profile`.
 
-Chromium is configured with command-line flags only, so rembro can use a regular Chromium profile that is closed without changing it. `--trust-target-ca` on a profile rembro did not create removes the target's CAs again when the browser exits. rembro marks the profiles it creates with a `rembro-profile` file, locks a `rembro-session.lock` file in them while a session uses them, and keeps its prefs in `user.js` between two marker comments. For other profiles, the lock file is in `rembro/locks` in rembro's data directory.
+Chromium is configured with command-line flags only, so rembro can use a regular Chromium profile that is closed without changing it. `--trust-target-ca` on a profile rembro did not create removes the target's CAs again when the browser exits. rembro marks the profiles it creates with a `rembro-profile` file, locks a `rembro-session.lock` file in them while a session uses them, and keeps its prefs in `user.js` between two marker comments. For other profiles, the lock file and the file that names the session are in `rembro/locks` in rembro's data directory.
+
+### The browser's own profiles
+
+`system` stands for the profiles that the browser keeps for itself, which it opens when you start it without rembro:
+
+- `--profile system` and `--fork system` use the browser's default profile. For Chromium and its forks, that is the one in `profile.last_used` in its `Local State` file, or else `Default`. For Firefox and its forks, it is the default of the first installation in `profiles.ini`, or else the profile marked `Default=1`, or the only one there is.
+- `--profile system:NAME` and `--fork system:NAME` use the profile with that name, as the browser shows it, ignoring case. When two names differ only in case, NAME must match one of them exactly. When no profile has the name, NAME can be the profile's directory instead, such as `Profile 1` for Chromium or `x8k2q1tv.default-release` for Firefox. Quote a name with spaces: `--fork 'system:Work stuff'`.
+- `REMBRO_PROFILE` takes the same values. `rembro profiles` lists the profiles it finds.
+
+rembro looks for them where each browser keeps them, and takes the first place that has any:
+
+| Browser | Linux | macOS, in `~/Library/Application Support` | Windows |
+|---|---|---|---|
+| `chromium` | `~/.config/chromium` | `Chromium` | `%LOCALAPPDATA%\Chromium\User Data` |
+| `chrome` | `~/.config/google-chrome` | `Google/Chrome` | `%LOCALAPPDATA%\Google\Chrome\User Data` |
+| `brave` | `~/.config/BraveSoftware/Brave-Browser` | `BraveSoftware/Brave-Browser` | `%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data` |
+| `edge` | `~/.config/microsoft-edge` | `Microsoft Edge` | `%LOCALAPPDATA%\Microsoft\Edge\User Data` |
+| `vivaldi` | `~/.config/vivaldi` | `Vivaldi` | `%LOCALAPPDATA%\Vivaldi\User Data` |
+| `firefox` | `~/.mozilla/firefox`, then `~/.config/mozilla/firefox` | `Firefox` | `%APPDATA%\Mozilla\Firefox` |
+| `librewolf` | `~/.librewolf`, then `~/.config/librewolf` | `librewolf` | `%APPDATA%\librewolf` |
+| `zen` | `~/.zen`, then `~/.config/zen` | `zen` | `%APPDATA%\zen` |
+
+On Linux, `~/.config` is `$XDG_CONFIG_HOME` when you set it, and rembro also looks in each browser's snap and flatpak, such as `~/snap/chromium/common/chromium`, `~/snap/firefox/common/.mozilla/firefox` and `~/.var/app/org.mozilla.firefox/.mozilla/firefox`. It looks there first when the browser it runs is the snap, or the flatpak by its ID, such as `-b org.mozilla.firefox`. With `--remote`, it looks in the target, at the Linux paths in the target's home directory, and a fork is made there. The Playwright builds, Epiphany and MiniBrowser have no `system` profiles; give another browser's profile with `--profile PATH`.
+
+Chromium keeps all of its profiles in one directory, so rembro starts it with `--user-data-dir` set to that directory and `--profile-directory` set to the profile's. A Chromium that has any of them open has that whole directory open, so rembro refuses `--profile system:NAME` while you have that browser open, as it does for any profile that is open in a browser rembro did not start. A fork copies only the chosen profile and `Local State`, which holds the key that the profile's cookies and passwords are encrypted with. `--trust-target-ca` works with Chromium's `Default` profile only.
+
+Google Chrome from version 136 ignores `--remote-debugging-port` on its own data directory, and so does Microsoft Edge ([Chrome's announcement](https://developer.chrome.com/blog/remote-debugging-port)). rembro therefore refuses `--debug` with `--profile system` for them, and suggests `--fork system`, whose copy lives in another directory. Chromium applies this rule only to Google Chrome's builds, so Chromium, Brave and Vivaldi still open the port.
+
+On Windows, Chrome, Edge and Brave protect cookies with App-Bound Encryption, and decrypt them only when they run on their own data directory. A fork of their own profile can therefore start signed out of most sites, and rembro warns about it. On Linux and macOS, the browser takes its key from the system's keyring or Keychain wherever its data directory is, so a fork keeps the logins.
 
 ### Listing and deleting profiles
 
-`rembro profiles` lists the profiles that rembro keeps on this machine, with their size and the day a session last used them. A Chromium profile that has been used for a while takes 150 to 200 MB.
+`rembro profiles` lists the profiles that rembro keeps on this machine, with their size and the day a session last used them. After them come the browsers' own profiles that it finds here, under the `system:NAME` that picks each one, with each browser's default marked. A Chromium profile that has been used for a while takes 150 to 200 MB.
 
-`rembro profiles --prune DAYS` deletes the profiles that no session has used for DAYS days, and the temporary profiles that sessions which were killed left behind. Forking a profile counts as using it. Pruning leaves profiles that are open, and profiles without the `rembro-profile` mark, such as one copied into rembro's directory by hand. It doesn't reach the profiles that `--remote` keeps in targets, which you can delete there.
+`rembro profiles --prune DAYS` deletes the profiles that no session has used for DAYS days, and the temporary profiles that sessions which were killed left behind. Forking a profile counts as using it. Pruning never touches the browsers' own profiles, and leaves profiles that are open and profiles without the `rembro-profile` mark, such as one copied into rembro's directory by hand. It doesn't reach the profiles that `--remote` keeps in targets, which you can delete there.
 
 ## Opening pages
 
@@ -208,7 +238,8 @@ rembro profiles [--prune DAYS]
     --target-proxy        connect through the HTTP proxy named by the target's
                           https_proxy, http_proxy and no_proxy
     --trust-target-ca     trust the CA certificates added to the target's trust store
-    --profile NAME|PATH   keep the browser's data in this profile (also REMBRO_PROFILE)
+    --profile NAME|PATH   keep the browser's data in this profile (also REMBRO_PROFILE);
+                          system or system:NAME is one of the browser's own
     --fork NAME|PATH      start from a copy of this profile
     --temp-profile        a new profile, even when REMBRO_PROFILE is set
     --force-profile       use a profile that is open elsewhere, or a Firefox profile

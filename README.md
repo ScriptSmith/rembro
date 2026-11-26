@@ -20,6 +20,7 @@ rembro --debug sbx:myapp                         # let an AI agent in the sandbo
 rembro --debug --headless sbx:myapp              # the same, with no browser window
 rembro --debug localhost:5173                    # let an AI agent on this machine drive the browser
 rembro --profile work ssh:bastion                # keep this browser's logins for next time
+rembro --fork system ssh:bastion                 # start from a copy of your own browser's logins
 rembro run ssh:devbox gimp                       # any GUI program, window shown here
 rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
 ```
@@ -66,7 +67,7 @@ Too big or complicated for your liking? Get most of the functionality with a 100
 
 Start a dev server in the target and run `rembro TARGET`, or `rembro` with no target for a dev server on this machine. With no URL, rembro opens a tab for each HTTP server listening on the target's loopback, and more tabs as new servers start. Give URLs to open particular pages instead.
 
-rembro picks the first browser it finds, starting with Chromium and its forks and then Firefox. Use `-b firefox` (or set `REMBRO_BROWSER`) to choose. It never uses your regular browser profile unless you ask: each session gets a new profile that is deleted when the browser exits, `--profile NAME` keeps one for next time, and `--fork NAME` starts from a copy of one ([details](docs/usage.md#profiles)).
+rembro picks the first browser it finds, starting with Chromium and its forks and then Firefox. Use `-b firefox` (or set `REMBRO_BROWSER`) to choose. It never uses your regular browser profile unless you ask: each session gets a new profile that is deleted when the browser exits, `--profile NAME` keeps one for next time, `--fork NAME` starts from a copy of one, and `--fork system` starts from a copy of your regular one ([details](docs/usage.md#profiles)).
 
 For `--remote`, the target needs a browser of its own. `rembro install TARGET` installs Chromium there, and `rembro install TARGET firefox` installs Firefox.
 

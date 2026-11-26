@@ -40,6 +40,7 @@ Examples:
   rembro --debug localhost:5173         let a program on this machine drive the browser
   rembro --profile work ssh:bastion     keep this browser's logins for next time
   rembro --fork work ssh:bastion        start from a copy of them, deleted at exit
+  rembro --fork system ssh:bastion      start from a copy of your own browser profile
   rembro sbx:myapp -- --incognito       pass arguments to the browser
   rembro run ssh:devbox gimp            run any program there, with its window here
   rembro install docker:web firefox     install a browser in the target for --remote
@@ -75,7 +76,8 @@ pub enum Command {
     Run(Run),
     /// Install a browser in the target, for --remote
     Install(Install),
-    /// List the browser profiles that rembro keeps on this machine, or delete old ones
+    /// List the browser profiles that rembro keeps on this machine and the browsers' own, or
+    /// delete old ones that rembro keeps
     Profiles(Profiles),
 }
 
@@ -122,13 +124,14 @@ pub struct Browse {
     pub trust_target_ca: bool,
 
     /// Keep the browser's cookies and other data in a profile with this name, or in the
-    /// directory at PATH. Without it (or REMBRO_PROFILE), each session gets a new profile
-    /// that is deleted when the browser exits
+    /// directory at PATH. `system` is the browser's own default profile, and `system:NAME`
+    /// its profile called NAME. Without it (or REMBRO_PROFILE), each session gets a new
+    /// profile that is deleted when the browser exits
     #[arg(long, value_name = "NAME|PATH", conflicts_with_all = ["fork", "temp_profile"])]
     pub profile: Option<String>,
 
     /// Start from a copy of this profile, deleted when the browser exits. NAME and PATH are
-    /// as for --profile
+    /// as for --profile, so `--fork system` starts from the browser's own default profile
     #[arg(long, value_name = "NAME|PATH", conflicts_with = "temp_profile")]
     pub fork: Option<String>,
 
@@ -138,7 +141,8 @@ pub struct Browse {
 
     /// Use the profile even where rembro would refuse: when a browser that rembro did not
     /// start has it open (the pages then load from that browser's network), or when it is a
-    /// Firefox profile that rembro did not create (rembro puts its settings back afterwards)
+    /// Firefox profile that rembro did not create (rembro puts its settings back afterwards,
+    /// as it does for `--profile system` without this flag)
     #[arg(long)]
     pub force_profile: bool,
 
@@ -365,6 +369,8 @@ mod tests {
         // A browser that a program drives doesn't get REMBRO_PROFILE's cookies unasked.
         assert_eq!(profile(&["--debug"], Some("work")).unwrap(), ProfileArg::Temp);
         assert_eq!(profile(&["--debug", "--profile", "work"], None).unwrap(), kept("work"));
+        assert_eq!(profile(&[], Some("system:Work")).unwrap(), kept("system:Work"));
+        assert_eq!(profile(&["--debug"], Some("system")).unwrap(), ProfileArg::Temp);
         assert!(profile(&["--profile", "a", "--fork", "b"], None).is_err());
         assert!(profile(&["--fork", "a", "--temp-profile"], None).is_err());
     }

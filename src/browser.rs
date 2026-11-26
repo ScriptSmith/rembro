@@ -1,7 +1,7 @@
 //! Browsers rembro knows how to find and configure.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -214,6 +214,180 @@ const DEFAULT_ORDER: &[&str] = &[
 pub const NAMES: &str = "auto, chromium, chrome, brave, edge, vivaldi, playwright-chromium, firefox, librewolf, zen, \
 playwright-firefox, webkit, epiphany, minibrowser, playwright-webkit, or a command or path";
 
+/// Where a browser keeps its own profiles: Chromium's user data directory, or the directory
+/// with Firefox's profiles.ini. `$XDG_CONFIG_HOME` is that variable, or ~/.config when it is
+/// not set.
+struct Own {
+    name: &'static str,
+    /// The ID of its flatpak, which is also the name of the command that runs it.
+    flatpak: &'static str,
+    linux: &'static [&'static str],
+    macos: &'static [&'static str],
+    windows: &'static [&'static str],
+}
+
+const OWN: &[Own] = &[
+    Own {
+        name: "chromium",
+        flatpak: "org.chromium.Chromium",
+        linux: &[
+            "$XDG_CONFIG_HOME/chromium",
+            "~/snap/chromium/common/chromium",
+            "~/.var/app/org.chromium.Chromium/config/chromium",
+        ],
+        macos: &["~/Library/Application Support/Chromium"],
+        windows: &[r"%LOCALAPPDATA%\Chromium\User Data"],
+    },
+    Own {
+        name: "chrome",
+        flatpak: "com.google.Chrome",
+        linux: &["$XDG_CONFIG_HOME/google-chrome", "~/.var/app/com.google.Chrome/config/google-chrome"],
+        macos: &["~/Library/Application Support/Google/Chrome"],
+        windows: &[r"%LOCALAPPDATA%\Google\Chrome\User Data"],
+    },
+    Own {
+        name: "brave",
+        flatpak: "com.brave.Browser",
+        linux: &[
+            "$XDG_CONFIG_HOME/BraveSoftware/Brave-Browser",
+            "~/snap/brave/current/.config/BraveSoftware/Brave-Browser",
+            "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+        ],
+        macos: &["~/Library/Application Support/BraveSoftware/Brave-Browser"],
+        windows: &[r"%LOCALAPPDATA%\BraveSoftware\Brave-Browser\User Data"],
+    },
+    Own {
+        name: "edge",
+        flatpak: "com.microsoft.Edge",
+        linux: &["$XDG_CONFIG_HOME/microsoft-edge", "~/.var/app/com.microsoft.Edge/config/microsoft-edge"],
+        macos: &["~/Library/Application Support/Microsoft Edge"],
+        windows: &[r"%LOCALAPPDATA%\Microsoft\Edge\User Data"],
+    },
+    Own {
+        name: "vivaldi",
+        flatpak: "com.vivaldi.Vivaldi",
+        linux: &[
+            "$XDG_CONFIG_HOME/vivaldi",
+            "~/snap/vivaldi/current/.config/vivaldi",
+            "~/.var/app/com.vivaldi.Vivaldi/config/vivaldi",
+        ],
+        macos: &["~/Library/Application Support/Vivaldi"],
+        windows: &[r"%LOCALAPPDATA%\Vivaldi\User Data"],
+    },
+    // Firefox keeps using ~/.mozilla once it has profiles there, and puts new ones in $XDG_CONFIG_HOME.
+    Own {
+        name: "firefox",
+        flatpak: "org.mozilla.firefox",
+        linux: &[
+            "~/.mozilla/firefox",
+            "$XDG_CONFIG_HOME/mozilla/firefox",
+            "~/snap/firefox/common/.mozilla/firefox",
+            "~/.var/app/org.mozilla.firefox/.mozilla/firefox",
+            "~/.var/app/org.mozilla.firefox/config/mozilla/firefox",
+        ],
+        macos: &["~/Library/Application Support/Firefox"],
+        windows: &[r"%APPDATA%\Mozilla\Firefox"],
+    },
+    Own {
+        name: "librewolf",
+        flatpak: "io.gitlab.librewolf-community",
+        linux: &["~/.librewolf", "$XDG_CONFIG_HOME/librewolf", "~/.var/app/io.gitlab.librewolf-community/.librewolf"],
+        macos: &["~/Library/Application Support/librewolf"],
+        windows: &[r"%APPDATA%\librewolf"],
+    },
+    Own {
+        name: "zen",
+        flatpak: "app.zen_browser.zen",
+        linux: &["~/.zen", "$XDG_CONFIG_HOME/zen", "~/.var/app/app.zen_browser.zen/.zen"],
+        macos: &["~/Library/Application Support/zen"],
+        windows: &[r"%APPDATA%\zen"],
+    },
+];
+
+pub const OWN_NAMES: &str = "chromium, chrome, brave, edge, vivaldi, firefox, librewolf and zen";
+
+/// The browser in `OWN` that `name` or the executable `exe` is.
+fn own(name: &str, exe: &str) -> Option<&'static Own> {
+    let file = Path::new(exe).file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+    OWN.iter().find(|o| o.name == name || o.flatpak == name || o.flatpak == file)
+}
+
+/// The name in `OWN` of the browser that `name` or the executable `exe` is.
+pub fn own_name(name: &str, exe: &str) -> Option<&'static str> {
+    own(name, exe).map(|o| o.name)
+}
+
+/// The directories where a browser may keep its own profiles on `os`, most likely first. A
+/// snap's or flatpak's come first when `exe`, the browser's executable, is one. None if rembro
+/// knows of none for this browser.
+pub fn own_profile_dirs(
+    name: &str,
+    exe: &str,
+    os: Os,
+    home: Option<&str>,
+    var: &dyn Fn(&str) -> Option<String>,
+) -> Option<Vec<PathBuf>> {
+    let o = own(name, exe)?;
+    let mut patterns: Vec<&str> = match os {
+        Os::Linux => o.linux.to_vec(),
+        Os::Macos => o.macos.to_vec(),
+        Os::Windows => o.windows.to_vec(),
+    };
+    let packaged = if exe.starts_with("/snap/") {
+        Some("~/snap/")
+    } else if exe.contains("/flatpak/") || Path::new(exe).file_name().is_some_and(|f| f == o.flatpak) {
+        Some("~/.var/app/")
+    } else {
+        None
+    };
+    if let Some(prefix) = packaged {
+        patterns.sort_by_key(|p| !p.starts_with(prefix));
+    }
+    Some(patterns.iter().filter_map(|p| expand_own(p, home, var)).collect())
+}
+
+/// Expands the `~`, `$XDG_CONFIG_HOME` or `%NAME%` at the start of a directory in `OWN`.
+fn expand_own(pattern: &str, home: Option<&str>, var: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    if let Some(rest) = pattern.strip_prefix("$XDG_CONFIG_HOME/") {
+        let base = match var("XDG_CONFIG_HOME") {
+            Some(d) if Path::new(&d).is_absolute() => PathBuf::from(d),
+            _ => Path::new(home?).join(".config"),
+        };
+        return Some(base.join(rest));
+    }
+    if let Some(rest) = pattern.strip_prefix('%') {
+        let (name, rest) = rest.split_once('%')?;
+        return Some(PathBuf::from(format!("{}{rest}", var(name).filter(|v| !v.is_empty())?)));
+    }
+    Some(Path::new(home?).join(pattern.strip_prefix("~/")?))
+}
+
+/// Whether the browser opens a debugging port when it runs on its own data directory. Google
+/// Chrome stopped doing so in version 136 (https://developer.chrome.com/blog/remote-debugging-port),
+/// and Edge followed. Chromium's own builds still do.
+pub fn debugs_own_profile(name: &str, exe: &str) -> bool {
+    !matches!(own_name(name, exe), Some("chrome" | "edge"))
+}
+
+/// For `rembro profiles`: each browser that keeps profiles of its own, with its family and the
+/// directories where they may be on this machine.
+pub fn own_profile_dirs_here() -> Vec<(&'static str, Family, Vec<PathBuf>)> {
+    let home = util::home();
+    OWN.iter()
+        .filter_map(|o| {
+            let known = KNOWN.iter().find(|k| k.name == o.name)?;
+            let exe = known
+                .candidates(Os::HERE)
+                .iter()
+                .find_map(|c| util::find_executable(c, home.as_deref()))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let dirs = own_profile_dirs(o.name, &exe, Os::HERE, home.as_deref(), &|k| std::env::var(k).ok())?;
+            Some((o.name, known.family, dirs))
+        })
+        .collect()
+}
+
 /// A browser to look for: the first candidate that exists wins.
 pub struct Choice {
     pub name: String,
@@ -308,6 +482,8 @@ pub enum Gui {
 pub struct Plan<'a> {
     pub browser: &'a Resolved,
     pub profile: &'a str,
+    /// For one of Chromium's own profiles, its directory in `profile`, such as `Profile 1`.
+    pub profile_directory: Option<&'a str>,
     pub net: Net,
     pub gui: Gui,
     pub debug_port: Option<u16>,
@@ -404,6 +580,9 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                 "--no-first-run".into(),
                 "--no-default-browser-check".into(),
             ]);
+            if let Some(dir) = p.profile_directory {
+                l.argv.push(format!("--profile-directory={dir}"));
+            }
             if p.temporary {
                 // Chromium would otherwise download over 100 MB of components, such as
                 // Widevine, into each new profile.
@@ -645,12 +824,45 @@ mod tests {
     }
 
     #[test]
+    fn own_profiles() {
+        let (home, h) = (Some("/home/u"), Path::new("/home/u"));
+        let xdg = std::env::temp_dir().join("xdg");
+        let var = |k: &str| (k == "XDG_CONFIG_HOME").then(|| xdg.to_string_lossy().into_owned());
+        let dirs = own_profile_dirs("chromium", "/usr/bin/chromium", Os::Linux, home, &var).unwrap();
+        assert_eq!(dirs[..2], [xdg.join("chromium"), h.join("snap/chromium/common/chromium")]);
+        // A snap's or flatpak's own directory comes first for that snap or flatpak.
+        let dirs = own_profile_dirs("chromium", "/snap/bin/chromium", Os::Linux, home, &|_| None).unwrap();
+        assert_eq!(dirs[..2], [h.join("snap/chromium/common/chromium"), h.join(".config").join("chromium")]);
+        let exe = "/var/lib/flatpak/exports/bin/org.mozilla.firefox";
+        let dirs = own_profile_dirs("org.mozilla.firefox", exe, Os::Linux, home, &|_| None).unwrap();
+        assert_eq!(dirs[0], h.join(".var/app/org.mozilla.firefox/.mozilla/firefox"));
+        assert_eq!(
+            dirs[1..3],
+            [h.join(".var/app/org.mozilla.firefox/config/mozilla/firefox"), h.join(".mozilla/firefox")]
+        );
+        assert_eq!(own_name("org.mozilla.firefox", exe), Some("firefox"));
+        let local = |k: &str| (k == "LOCALAPPDATA").then(|| r"C:\Users\u\AppData\Local".to_string());
+        let dirs = own_profile_dirs("edge", "msedge.exe", Os::Windows, None, &local).unwrap();
+        assert_eq!(dirs, [PathBuf::from(r"C:\Users\u\AppData\Local\Microsoft\Edge\User Data")]);
+        assert!(own_profile_dirs("firefox", "firefox.exe", Os::Windows, None, &|_| None).unwrap().is_empty());
+        assert!(own_profile_dirs("playwright-chromium", "", Os::Linux, home, &|_| None).is_none());
+        assert!(own_profile_dirs("epiphany", "/usr/bin/epiphany", Os::Linux, home, &|_| None).is_none());
+        // Google Chrome and Edge ignore --remote-debugging-port on their own data directory.
+        assert!(!debugs_own_profile("chrome", "/usr/bin/google-chrome-stable"));
+        assert!(!debugs_own_profile("com.google.Chrome", "/var/lib/flatpak/exports/bin/com.google.Chrome"));
+        assert!(!debugs_own_profile("edge", "/usr/bin/microsoft-edge-stable"));
+        assert!(debugs_own_profile("chromium", "/usr/bin/chromium"));
+        assert!(debugs_own_profile("brave", "/usr/bin/brave-browser"));
+    }
+
+    #[test]
     fn chromium_flags() {
         let b = Resolved { name: "chromium".into(), family: Family::Chromium, path: "/usr/bin/chromium".into() };
         let urls = ["http://localhost:5173".to_string()];
         let l = launch(&Plan {
             browser: &b,
             profile: "/p",
+            profile_directory: None,
             net: Net::Proxy { socks_port: 1080, loopback_only: true },
             gui: Gui::Host,
             debug_port: Some(0),
@@ -673,6 +885,7 @@ mod tests {
         let l = launch(&Plan {
             browser: &b,
             profile: "/p",
+            profile_directory: None,
             net: Net::Native,
             gui: Gui::Headless,
             debug_port: Some(9222),
@@ -688,5 +901,25 @@ mod tests {
         assert!(l.argv.contains(&"--headless".to_string()));
         assert_eq!(l.argv.last().unwrap(), "http://localhost:5173");
         assert_eq!(l.later, ["http://localhost:8080"]);
+        assert!(!l.argv.iter().any(|a| a.starts_with("--profile-directory")));
+
+        let l = launch(&Plan {
+            browser: &b,
+            profile: "/home/u/.config/chromium",
+            profile_directory: Some("Profile 1"),
+            net: Net::Native,
+            gui: Gui::Host,
+            debug_port: None,
+            urls: &[],
+            extra: &[],
+            root: false,
+            small_shm: false,
+            new_instance: true,
+            temporary: false,
+            verbose: false,
+        })
+        .unwrap();
+        assert!(l.argv.contains(&"--user-data-dir=/home/u/.config/chromium".to_string()));
+        assert!(l.argv.contains(&"--profile-directory=Profile 1".to_string()));
     }
 }

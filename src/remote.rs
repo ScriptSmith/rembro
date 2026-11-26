@@ -15,10 +15,10 @@ use crate::cli::{Browse, DisplayArg, GuiOpts, ProfileArg};
 use crate::host::{self, Conn, Endpoint, HostEvent, Limiter, PULSE_ID, Session, WAYLAND_ID, X11_ID};
 use crate::local::TempDir;
 use crate::mux::Sock;
-use crate::proto::{Addr, Call, Event, Open, ProfileSpec};
+use crate::proto::{Addr, Call, Event, Open, Opened, ProfileSpec};
 use crate::target::Target;
 use crate::util::{self, PortSpec};
-use crate::{fetch, sys, x11};
+use crate::{fetch, profile, sys, x11};
 
 fn resolve(s: &Session, choice: &str, family: Option<Family>) -> Result<Resolved, String> {
     let choices = browser::choices(choice, family, browser::Os::Linux)?;
@@ -304,18 +304,31 @@ pub fn setup_gui(s: &Session, opts: &GuiOpts, dir: &str, required: bool) -> Resu
 }
 
 /// The profile in the target, and whether a browser there already has it open.
-fn profile_dir(b: &Browse, s: &Session, browser: &Resolved) -> Result<(String, bool), String> {
-    let path_of = |p: &str| {
+fn profile_dir(b: &Browse, s: &Session, browser: &Resolved) -> Result<Opened, String> {
+    let path_of = |p: &str| -> Result<String, String> {
         if p.contains('/') || p == "~" {
-            p.to_string()
+            Ok(p.to_string())
         } else {
-            format!("~/.local/share/rembro/profiles/{}/{}", browser.name, util::slug(p))
+            profile::check_name(p)?;
+            Ok(format!("~/.local/share/rembro/profiles/{}/{}", browser.name, util::slug(p)))
         }
     };
+    let own = |name: Option<&str>, fork| ProfileSpec::System {
+        browser: browser.name.clone(),
+        exe: browser.path.clone(),
+        name: name.map(String::from),
+        fork,
+    };
     let profile = match b.profile_arg() {
-        ProfileArg::Kept(p) => ProfileSpec::Kept { path: path_of(&p) },
+        ProfileArg::Kept(p) => match profile::system_name(&p) {
+            Some(name) => own(name, false),
+            None => ProfileSpec::Kept { path: path_of(&p)? },
+        },
         ProfileArg::Temp => ProfileSpec::Temp { fork: None },
-        ProfileArg::Fork(p) => ProfileSpec::Temp { fork: Some(path_of(&p)) },
+        ProfileArg::Fork(p) => match profile::system_name(&p) {
+            Some(name) => own(name, true),
+            None => ProfileSpec::Temp { fork: Some(path_of(&p)?) },
+        },
     };
     s.call(&Call::Profile { profile, family: browser.family, target: s.label.clone() })
 }
@@ -362,6 +375,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if debug.is_some() && browser::debug_endpoint(browser.family, 0).is_none() {
         return Err(format!("--debug needs a Chromium or Firefox browser, not {}", browser.name));
     }
+    if debug.is_some() {
+        profile::check_debug(&b.profile_arg(), &browser)?;
+    }
     let mut gui_opts = b.gui.clone();
     if b.headless {
         gui_opts.display = DisplayArg::None;
@@ -381,7 +397,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     let started = Instant::now();
     s.call::<String>(&Call::Shim)?;
 
-    let (profile, busy) = profile_dir(b, s, &browser)?;
+    let Opened { path: profile, busy, directory } = profile_dir(b, s, &browser)?;
     let temporary = !matches!(b.profile_arg(), ProfileArg::Kept(_));
     if busy && debug.is_some() {
         return Err(format!(
@@ -441,6 +457,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         browser::launch(&Plan {
             browser: &browser,
             profile: &profile,
+            profile_directory: directory.as_deref(),
             net: Net::Native,
             gui: gui_kind,
             debug_port: if first { debug_port } else { None },
@@ -456,6 +473,19 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     let launch = launch_for(&urls, true)?;
     if s.info.uid == 0 && browser.family == Family::Chromium {
         eprintln!("rembro: {} runs this as root, so Chromium's sandbox is off", s.label);
+    }
+    // The browser's own Firefox profile gets its settings back when the agent exits.
+    if !busy
+        && browser.family == Family::Firefox
+        && matches!(b.profile_arg(), ProfileArg::Kept(p) if profile::system_name(&p).is_some())
+    {
+        let keys = launch
+            .files
+            .iter()
+            .filter_map(|(_, e)| if let Edit::Block(block) = e { Some(profile::pref_keys(block)) } else { None })
+            .flatten()
+            .collect();
+        s.call::<serde_json::Value>(&Call::SaveFirefox { path: profile.clone(), keys })?;
     }
     // A browser that already has the profile open reads none of these files.
     let files = if busy { Vec::new() } else { launch.files };
