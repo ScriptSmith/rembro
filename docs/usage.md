@@ -142,7 +142,7 @@ Where the pages open depends on the mode:
 
 ## Letting a program drive the browser
 
-`--debug` exposes the browser's debugging endpoint inside the target, on `127.0.0.1:9222` (or a free port if 9222 is taken), and opens a tab that shows how to connect:
+`--debug` exposes the browser's debugging endpoint inside the target, on `127.0.0.1:9222` (or a free port if 9222 is taken), and opens a page that shows how to connect in the first tab:
 
 ```
 $ rembro --debug sbx:myapp

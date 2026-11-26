@@ -434,7 +434,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         && !b.headless
     {
         let path = write(s, &format!("{dir}/attach.html"), page.into_bytes(), 0o644)?;
-        urls.push(util::file_url(&path));
+        urls.insert(0, util::file_url(&path));
     }
 
     let launch_for = |urls: &[String], first: bool| -> Result<browser::Launch, String> {

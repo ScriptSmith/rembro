@@ -288,7 +288,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
         let dir = util::mkdtemp(&util::runtime_base(), "rembro-").map_err(|e| format!("mkdtemp: {e}"))?;
         let path = dir.join("attach.html");
         fs::write(&path, page).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-        urls.push(util::file_url(&path.to_string_lossy()));
+        urls.insert(0, util::file_url(&path.to_string_lossy()));
         _page_dir = Some(TempDir(dir));
     }
 
