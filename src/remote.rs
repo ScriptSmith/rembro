@@ -333,11 +333,30 @@ fn profile_dir(b: &Browse, s: &Session, browser: &Resolved) -> Result<Opened, St
     s.call(&Call::Profile { profile, family: browser.family, target: s.label.clone() })
 }
 
-/// The debugging port in the DevToolsActivePort file of the Chromium that has `profile` open
-/// in the target.
+/// Prints the command line of the Chromium whose SingletonLock, in the profile $1, names it
+/// as HOST-PID. Chromium's browser process rewrites its command line as one line with spaces
+/// between the arguments, and other processes' have NULs there.
+const COMMAND_LINE: &str = r#"lock=$(readlink "$1/SingletonLock") && tr '\0' '\n' < "/proc/${lock##*-}/cmdline""#;
+
+/// The debugging port of the Chromium that has `profile` open in the target. Chromium writes
+/// it to DevToolsActivePort only when it chose the port itself, so for a port that rembro
+/// gave it, the port comes from its command line.
 fn devtools_port(s: &Session, profile: &str) -> Option<u16> {
     let data: Option<Vec<u8>> = s.call(&Call::ReadFile { path: format!("{profile}/DevToolsActivePort") }).ok()?;
-    String::from_utf8_lossy(&data?).lines().next()?.trim().parse().ok()
+    if let Some(port) = data.and_then(|d| String::from_utf8_lossy(&d).lines().next()?.trim().parse().ok()) {
+        return Some(port);
+    }
+    let argv = ["sh", "-c", COMMAND_LINE, "sh", profile].map(String::from).into();
+    let (_, out) = s.call::<(Option<i32>, String)>(&Call::Capture { argv, timeout_ms: 10_000 }).ok()?;
+    debugging_port(&out)
+}
+
+/// The port in a `--remote-debugging-port` argument of a command line.
+fn debugging_port(command_line: &str) -> Option<u16> {
+    command_line
+        .split_whitespace()
+        .find_map(|a| a.strip_prefix("--remote-debugging-port=")?.parse().ok())
+        .filter(|&p| p != 0)
 }
 
 /// Opens a page in the Chromium listening for CDP on `port` in the target.
@@ -653,5 +672,16 @@ mod tests {
         assert_eq!(chromium_major("Google Chrome 131.0.6778.85 "), Some(131));
         assert_eq!(chromium_major("Brave Browser 131.1.73.89"), Some(131));
         assert_eq!(chromium_major("nonsense 1.2"), None);
+    }
+
+    #[test]
+    fn debugging_ports() {
+        let args = "/usr/lib/chromium/chromium\n--user-data-dir=/p\n--remote-debugging-port=9222\n--headless\n";
+        assert_eq!(debugging_port(args), Some(9222));
+        let rewritten = "/usr/lib/chromium/chromium --user-data-dir=/p --headless --remote-debugging-port=19450 x\n";
+        assert_eq!(debugging_port(rewritten), Some(19450));
+        assert_eq!(debugging_port("chromium\n--remote-debugging-port=0\n"), None);
+        assert_eq!(debugging_port("chromium\n--remote-debugging-pipe\n"), None);
+        assert_eq!(debugging_port(""), None);
     }
 }
