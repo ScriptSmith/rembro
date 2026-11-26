@@ -1,0 +1,26 @@
+{
+  "name": "rembro",
+  "version": "0.0.0",
+  "description": "Open a browser that uses the network of an SSH host, container, sandbox or Kubernetes pod",
+  "keywords": ["browser", "docker", "kubernetes", "ssh", "proxy"],
+  "homepage": "https://github.com/ScriptSmith/rembro",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ScriptSmith/rembro.git"
+  },
+  "license": "MIT OR Apache-2.0",
+  "bin": {
+    "rembro": "rembro.js"
+  },
+  "files": [
+    "rembro.js",
+    "rembro-x86_64",
+    "rembro-aarch64",
+    "rembro-armv7",
+    "rembro-macos-aarch64",
+    "rembro-macos-x86_64",
+    "rembro-windows-x86_64.exe",
+    "LICENSE-MIT",
+    "LICENSE-APACHE"
+  ]
+}

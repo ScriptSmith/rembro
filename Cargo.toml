@@ -9,7 +9,7 @@ repository = "https://github.com/ScriptSmith/rembro"
 readme = "README.md"
 keywords = ["browser", "docker", "kubernetes", "ssh", "proxy"]
 categories = ["command-line-utilities", "development-tools", "network-programming"]
-exclude = ["/.github", "/scripts", "/target", "/dist", "/.env", "/install.sh", "/rembro.sh"]
+exclude = ["/.github", "/scripts", "/packaging", "/target", "/dist", "/.env", "/install.sh", "/rembro.sh"]
 
 [dependencies]
 clap = { version = "4.5", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions", "wrap_help"] }

@@ -1,6 +1,6 @@
 # Installing rembro
 
-This page covers the install script, installing a release archive by hand, which also works on Windows, where the script doesn't run, and installing with Cargo.
+This page covers the install script, the npm and PyPI packages, installing a release archive by hand, which also works on Windows, where the script doesn't run, and installing with Cargo.
 
 ## With the install script
 
@@ -9,6 +9,24 @@ curl -fsSL https://raw.githubusercontent.com/ScriptSmith/rembro/main/install.sh 
 ```
 
 The script works on Linux and macOS. It downloads the latest release for this machine, checks it against the release's `SHA256SUMS`, unpacks it into `~/.local/lib/rembro` and links `~/.local/bin/rembro` to it. `curl ... | REMBRO_VERSION=0.1.0 sh` installs a particular release, and `REMBRO_PREFIX` puts it somewhere other than `~/.local`.
+
+## With npm, uv or pipx
+
+The `rembro` packages on npm and PyPI work on Linux, macOS and Windows. `npx` and `uvx` run rembro without installing it:
+
+```sh
+npx rembro ssh:devbox
+uvx rembro ssh:devbox
+```
+
+To install it as a `rembro` command:
+
+```sh
+npm install -g rembro
+uv tool install rembro    # or: pipx install rembro
+```
+
+Each package holds all six release builds of rembro (Linux on x86_64, aarch64 and armv7, macOS on aarch64 and x86_64, and Windows on x86_64) and a small launcher that runs the one for this machine. Windows on Arm runs the x86_64 build under emulation. The Linux builds that rembro copies into targets are already next to it, so the only file rembro downloads on first use is waypipe. It needs waypipe on Linux, when `--remote` or `rembro run` forwards windows over Wayland to a target that has none, and downloads and caches it as a [Cargo install](#with-cargo) does.
 
 ## From a release archive
 

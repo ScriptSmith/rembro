@@ -118,8 +118,32 @@ jobs:
           name: waypipe
           path: out/
 
+  # npm and PyPI get one package each, with the six rembro builds and a launcher that runs the
+  # one for its system from the package directory, so the Linux agents sit next to it as they do
+  # in the archives. waypipe stays out, and rembro downloads it from the GitHub release when it
+  # needs it.
+  packages:
+    needs: [rembro, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rembro*
+          path: dist
+          merge-multiple: true
+      - run: packaging/build.sh "${GITHUB_REF_NAME#v}" dist packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm
+          path: packages/npm/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pypi
+          path: packages/pypi/
+
   release:
-    needs: [rembro, macos, windows, waypipe]
+    needs: [rembro, macos, windows, waypipe, packages]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -199,3 +223,43 @@ jobs:
       - run: cargo publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+  # One-time setup: npm adds trusted publishers only to packages that exist, so this job fails on
+  # the first release, and that version goes up by hand from the run's npm artifact
+  # (gh run download RUN -n npm, then npm publish ./rembro-VERSION.tgz). Shortly before the next
+  # tag, add a trusted publisher in the package's settings on npmjs.com for ScriptSmith/rembro,
+  # workflow release.yml and environment npm, allowing npm publish. One that no publish uses
+  # within 2 days expires.
+  npm:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm
+      # Trusted publishing needs npm 11.5.1 or later, which Node 24 includes.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm publish "./rembro-${GITHUB_REF_NAME#v}.tgz"
+
+  # One-time setup: under Publishing in the PyPI account settings, add a pending trusted publisher
+  # for the project rembro, ScriptSmith/rembro, workflow release.yml and environment pypi. The
+  # first upload creates the project, so nothing goes up by hand.
+  pypi:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: pypi
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
