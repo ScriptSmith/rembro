@@ -2,8 +2,8 @@
 # Builds the npm package and the PyPI wheel from the release builds in DIST:
 #   packaging/build.sh VERSION DIST OUT
 #
-# OUT gets npm/rembro-VERSION.tgz and pypi/rembro-VERSION-py3-none-any.whl. Each holds the six
-# rembro builds and a launcher that runs the one for its system.
+# OUT gets npm/scriptsmith-rembro-VERSION.tgz and pypi/rembro-VERSION-py3-none-any.whl. Each
+# holds the six rembro builds and a launcher that runs the one for its system.
 
 set -eu
 

@@ -12,17 +12,17 @@ The script works on Linux and macOS. It downloads the latest release for this ma
 
 ## With npm, uv or pipx
 
-The `rembro` packages on npm and PyPI work on Linux, macOS and Windows. `npx` and `uvx` run rembro without installing it:
+The `@scriptsmith/rembro` package on npm and the `rembro` package on PyPI work on Linux, macOS and Windows. `npx` and `uvx` run rembro without installing it:
 
 ```sh
-npx rembro ssh:devbox
+npx @scriptsmith/rembro ssh:devbox
 uvx rembro ssh:devbox
 ```
 
 To install it as a `rembro` command:
 
 ```sh
-npm install -g rembro
+npm install -g @scriptsmith/rembro
 uv tool install rembro    # or: pipx install rembro
 ```
 
