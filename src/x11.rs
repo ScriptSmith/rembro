@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpStream};
+use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -168,15 +168,7 @@ fn admit(mut client: Sock, display: &Display, cookie: Option<&[u8]>) -> io::Resu
     let Ok(mut server) = display.connect() else { return Ok(()) };
     server.write_all(&head)?;
     server.write_all(&rest)?;
-    let (mut server_r, mut client_w) = (server.try_clone()?, client.try_clone()?);
-    let up = thread::spawn(move || {
-        let _ = io::copy(&mut server_r, &mut client_w);
-        client_w.shutdown(Shutdown::Write);
-    });
-    let _ = io::copy(&mut client, &mut server);
-    server.shutdown(Shutdown::Write);
-    let _ = up.join();
-    Ok(())
+    client.join(server)
 }
 
 struct Entry {

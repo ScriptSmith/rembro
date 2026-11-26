@@ -92,6 +92,19 @@ impl Sock {
             Sock::Unix(s) => s.shutdown(how),
         };
     }
+
+    /// Copies bytes both ways between two sockets until both directions end.
+    pub fn join(mut self, mut other: Sock) -> io::Result<()> {
+        let (mut other_r, mut self_w) = (other.try_clone()?, self.try_clone()?);
+        let back = thread::spawn(move || {
+            let _ = io::copy(&mut other_r, &mut self_w);
+            self_w.shutdown(Shutdown::Write);
+        });
+        let _ = io::copy(&mut self, &mut other);
+        other.shutdown(Shutdown::Write);
+        let _ = back.join();
+        Ok(())
+    }
 }
 
 impl Read for Sock {

@@ -1,6 +1,7 @@
 //! rembro's side of a session: the agent connection, forwards, signals and shared steps.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
@@ -45,6 +46,13 @@ pub enum Endpoint {
     Unix(PathBuf),
     /// The X server, for clients that present this cookie.
     X11(x11::Display, Option<Vec<u8>>),
+    /// An HTTP server that clients reach at `target_port` in the target. Firefox's debugging
+    /// server refuses a Host header that names any port but its own, so the port in each
+    /// request's Host is changed from `target_port` to `addr`'s.
+    Http {
+        addr: SocketAddr,
+        target_port: u16,
+    },
     Pending(&'static str),
 }
 
@@ -82,6 +90,7 @@ impl Handler for HostHandler {
             #[cfg(not(unix))]
             Some(Endpoint::Unix(p)) => Err(format!("refused: cannot connect to {} here", p.display())),
             Some(Endpoint::X11(d, cookie)) => d.gate(cookie.clone()),
+            Some(Endpoint::Http { addr, target_port }) => http_gate(*addr, *target_port),
             Some(Endpoint::Pending(why)) => Err(format!("refused: {why}")),
             None => Err("other: not permitted".into()),
         }
@@ -104,6 +113,56 @@ impl Handler for HostHandler {
     fn closed(&self) {
         let _ = self.events.send(HostEvent::AgentClosed);
     }
+}
+
+/// Joins a client to the HTTP server at `addr` once its Host header names `addr`'s port in
+/// place of `target_port`. Only the first request needs it: Firefox's server closes each
+/// connection after one response, and a WebSocket carries no more HTTP after the upgrade.
+fn http_gate(addr: SocketAddr, target_port: u16) -> Result<Sock, String> {
+    let server = TcpStream::connect(addr).map_err(|e| format!("refused: {e}"))?;
+    let _ = server.set_nodelay(true);
+    let (outer, mut client) = Sock::pair().map_err(|e| format!("other: {e}"))?;
+    thread::spawn(move || -> io::Result<()> {
+        client.set_timeout(Some(Duration::from_secs(30)));
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            let n = client.read(&mut chunk)?;
+            if n == 0 || buf.len() > 64 * 1024 {
+                return Ok(());
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        client.set_timeout(None);
+        let mut server = Sock::Tcp(server);
+        server.write_all(&with_host_port(&buf[..end], target_port, addr.port()))?;
+        server.write_all(&buf[end..])?;
+        client.join(server)
+    });
+    Ok(outer)
+}
+
+/// An HTTP request head with the port in its Host header changed from `from` to `to`. The
+/// host name stays, so that the server can still refuse names it does not know.
+fn with_host_port(head: &[u8], from: u16, to: u16) -> Vec<u8> {
+    let Ok(text) = std::str::from_utf8(head) else { return head.to_vec() };
+    let from = format!(":{from}");
+    let lines: Vec<String> = text
+        .split("\r\n")
+        .enumerate()
+        .map(|(i, line)| match line.split_once(':') {
+            Some((name, value)) if i > 0 && name.eq_ignore_ascii_case("host") => match value.trim().strip_suffix(&from)
+            {
+                Some(host) => format!("{name}: {host}:{to}"),
+                None => line.to_string(),
+            },
+            _ => line.to_string(),
+        })
+        .collect();
+    lines.join("\r\n").into_bytes()
 }
 
 /// One connection to an agent: its mux and the transport process carrying it.
@@ -458,5 +517,30 @@ pub fn relay_output(stream: u8, text: &str) {
         let _ = out.flush();
     } else {
         let _ = std::io::stderr().lock().write_all(text.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_port() {
+        let rewrite = |head: &str| String::from_utf8(with_host_port(head.as_bytes(), 9222, 38859)).unwrap();
+        assert_eq!(
+            rewrite("GET /session HTTP/1.1\r\nhost:  127.0.0.1:9222 \r\nUpgrade: websocket\r\n\r\n"),
+            "GET /session HTTP/1.1\r\nhost: 127.0.0.1:38859\r\nUpgrade: websocket\r\n\r\n"
+        );
+        assert_eq!(
+            rewrite("GET / HTTP/1.1\r\nHost: [::1]:9222\r\n\r\n"),
+            "GET / HTTP/1.1\r\nHost: [::1]:38859\r\n\r\n"
+        );
+        for kept in [
+            "GET / HTTP/1.1\r\nHost: localhost:19222\r\n\r\n",
+            "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            "GET /host:9222 HTTP/1.1\r\nX-Host: a:9222\r\n\r\n",
+        ] {
+            assert_eq!(rewrite(kept), kept);
+        }
     }
 }

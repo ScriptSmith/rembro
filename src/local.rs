@@ -155,7 +155,13 @@ fn connect_debugger(s: &Session, family: Family, profile: &Path, port: u16, targ
             if let Some((port, path)) = found {
                 let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
                 if TcpStream::connect(addr).is_ok() {
-                    handler.set_forward(DEBUG_ID, Endpoint::Tcp(addr));
+                    // Chromium builds the WebSocket URLs it hands out from the Host header,
+                    // which has to keep naming the target's port.
+                    let endpoint = match family {
+                        Family::Chromium => Endpoint::Tcp(addr),
+                        _ => Endpoint::Http { addr, target_port },
+                    };
+                    handler.set_forward(DEBUG_ID, endpoint);
                     if verbose {
                         eprintln!("rembro: {label}'s 127.0.0.1:{target_port} now reaches the browser's {addr}");
                     }
