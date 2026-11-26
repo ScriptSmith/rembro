@@ -286,15 +286,16 @@ const CACHES: &[&str] = &[
 ];
 
 /// Copies a profile, which a browser may have open, into the empty directory `dst`. With
-/// `only`, `src` is a Chromium user data directory, and the copy has just that profile and
-/// the `Local State` with the key that its cookies and passwords are encrypted with.
+/// `only`, `src` is a Chromium user data directory, and the copy has just that profile, the
+/// `Local State` with the key that its cookies and passwords are encrypted with, and the
+/// Widevine module that the profiles share.
 fn copy_profile(src: &Path, dst: &Path, only: Option<&str>) -> io::Result<()> {
     fn copy_dir(src: &Path, dst: &Path, top: bool, only: Option<&str>) -> io::Result<()> {
         for entry in fs::read_dir(src)? {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let other = only.is_some_and(|d| name != d && name != "Local State");
+            let other = only.is_some_and(|d| name != d && name != "Local State" && name != "WidevineCdm");
             if CACHES.contains(&name.as_ref()) || (top && (NOT_COPIED.contains(&name.as_ref()) || other)) {
                 continue;
             }
@@ -1313,10 +1314,13 @@ mod tests {
         assert_eq!(pick(ini(""), Some("b2.default-release")).unwrap().name, "default-release");
         assert!(chromium_profiles(&root).is_none() && firefox_profiles(&root).is_none());
 
-        // A fork of one of Chromium's profiles copies that profile and Local State, and nothing else.
+        // A fork of one of Chromium's profiles copies that profile, Local State and Widevine,
+        // and nothing else.
         fs::write(chromium.join("Local State"), state).unwrap();
         fs::write(chromium.join("Profile 2/Cookies"), "cookies").unwrap();
         fs::write(chromium.join("Last Version"), "1").unwrap();
+        fs::create_dir_all(chromium.join("WidevineCdm/4.10")).unwrap();
+        fs::write(chromium.join("WidevineCdm/4.10/manifest.json"), "{}").unwrap();
         let entries =
             || fs::read_dir(&chromium).unwrap().map(|e| e.unwrap().path()).collect::<std::collections::BTreeSet<_>>();
         let before = entries();
@@ -1325,6 +1329,7 @@ mod tests {
         assert_eq!(fs::read_to_string(fork.path.join("Profile 2/Cookies")).unwrap(), "cookies");
         assert!(!fork.path.join("Profile 2/Cache").exists());
         assert!(!fork.path.join("Default").exists() && !fork.path.join("Last Version").exists());
+        assert!(fork.path.join("WidevineCdm/4.10/manifest.json").is_file());
         let copy: serde_json::Value =
             serde_json::from_slice(&fs::read(fork.path.join("Local State")).unwrap()).unwrap();
         let cached: Vec<&String> = copy["profile"]["info_cache"].as_object().unwrap().keys().collect();
