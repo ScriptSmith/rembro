@@ -9,6 +9,7 @@ Run with the `--debug` flag, and let your agent drive the browser via playwright
 rembro runs on Linux, macOS and Windows. Its targets run Linux.
 
 ```sh
+rembro                                           # a tab for each dev server on this Linux machine
 rembro ssh:devbox                                # a tab for each dev server on devbox
 rembro docker:shop-web-1 http://api:8000         # a Compose service, by its name
 rembro k8s:shop/api-7d9f http://orders.shop.svc  # a cluster service, no kubectl port-forward
@@ -17,6 +18,7 @@ rembro ssh:bastion,ssh:box,docker:web            # a container on a host behind 
 rembro --remote ssh:devbox                       # run the browser on devbox, show its window here
 rembro --debug sbx:myapp                         # let an AI agent in the sandbox drive the browser
 rembro --debug --headless sbx:myapp              # the same, with no browser window
+rembro --debug localhost:5173                    # let an AI agent on this machine drive the browser
 rembro --profile work ssh:bastion                # keep this browser's logins for next time
 rembro run ssh:devbox gimp                       # any GUI program, window shown here
 rembro install docker:shop-web-1 firefox         # put a browser in the container for --remote
@@ -49,7 +51,7 @@ Too big or complicated for your liking? Get most of the functionality with a 100
 
 | Target | What it is |
 |---|---|
-| `local` | this machine, on Linux |
+| `local` | this machine, on Linux, and the default |
 | `ssh:[USER@]HOST[:PORT]` | a host or VM reached with `ssh`, using your ssh config |
 | `docker:NAME`, `podman:NAME`, `nerdctl:NAME` | a running container |
 | `apple-container:NAME` | a container run by Apple's `container` tool |
@@ -62,7 +64,7 @@ Too big or complicated for your liking? Get most of the functionality with a 100
 
 ## Getting started
 
-Start a dev server in the target and run `rembro TARGET`. With no URL, rembro opens a tab for each HTTP server listening on the target's loopback, and more tabs as new servers start. Give URLs to open particular pages instead.
+Start a dev server in the target and run `rembro TARGET`, or `rembro` with no target for a dev server on this machine. With no URL, rembro opens a tab for each HTTP server listening on the target's loopback, and more tabs as new servers start. Give URLs to open particular pages instead.
 
 rembro picks the first browser it finds, starting with Chromium and its forks and then Firefox. Use `-b firefox` (or set `REMBRO_BROWSER`) to choose. It never uses your regular browser profile unless you ask: each session gets a new profile that is deleted when the browser exits, `--profile NAME` keeps one for next time, and `--fork NAME` starts from a copy of one ([details](docs/usage.md#profiles)).
 

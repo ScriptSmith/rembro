@@ -3,10 +3,11 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 use crate::browser::Family;
+use crate::target::Target;
 
 const AFTER_HELP: &str = "\
 Targets:
-  local                            this machine, on Linux
+  local                            this machine, on Linux, and the default
   ssh:[USER@]HOST[:PORT]           a host or VM reached with ssh; your ssh config applies
   docker:CONTAINER                 a running Docker container (also podman:, nerdctl:)
   apple-container:CONTAINER        a container run by Apple's container tool on macOS
@@ -23,7 +24,12 @@ Targets run Linux, and need only sh. rembro copies its Linux agent there (to
 ~/.cache/rembro, or /tmp) the first time, and talks to it over the command's stdin
 and stdout.
 
+With no target, rembro uses local. When the first argument is not a target but starts
+with http://, https://, localhost:, 127. or [, it is the first URL and the target is
+local.
+
 Examples:
+  rembro                                open this machine's dev servers, on Linux
   rembro sbx:myapp                      open the sandbox's dev servers in a browser here
   rembro docker:web http://localhost:3000 -b firefox
   rembro k8s:shop/api-7d9f http://orders.shop.svc:8080
@@ -31,6 +37,7 @@ Examples:
   rembro --remote ssh:devbox            run Chromium on devbox and show its window here
   rembro --debug sbx:myapp              let an agent in the sandbox drive the browser
   rembro --debug --headless sbx:myapp   the same, with no browser window
+  rembro --debug localhost:5173         let a program on this machine drive the browser
   rembro --profile work ssh:bastion     keep this browser's logins for next time
   rembro --fork work ssh:bastion        start from a copy of them, deleted at exit
   rembro sbx:myapp -- --incognito       pass arguments to the browser
@@ -48,8 +55,8 @@ Examples:
         goes through the target, so localhost, service names and private addresses resolve \
         and connect as they would there. With --remote, the browser runs in the target \
         and its window is shown here.",
-    after_help = AFTER_HELP,
-    subcommand_negates_reqs = true
+    override_usage = "rembro [OPTIONS] [TARGET] [URL]... [-- <BROWSER_ARGS>...]\n       rembro [OPTIONS] <COMMAND>",
+    after_help = AFTER_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -74,11 +81,12 @@ pub enum Command {
 
 #[derive(Args, Debug)]
 pub struct Browse {
-    /// Where the browser's network lives (see Targets below)
-    #[arg(required = true)]
+    /// Where the browser's network lives (see Targets below). Without one, or with a URL in its
+    /// place, the target is local
     pub target: Option<String>,
 
     /// Pages to open. With none, opens the HTTP servers listening on the target's loopback
+    #[arg(value_name = "URL")]
     pub urls: Vec<String>,
 
     /// Arguments for the browser, after --
@@ -285,6 +293,54 @@ impl Browse {
     pub fn watching(&self) -> bool {
         self.watch || (self.urls.is_empty() && !self.no_watch)
     }
+
+    /// The target, which is local when none is given. A URL given in its place becomes the
+    /// first URL, and URLs such as localhost:3000 get http:// in front, which Chromium needs.
+    pub fn take_target(&mut self) -> Result<String, String> {
+        self.target_on(cfg!(target_os = "linux"))
+    }
+
+    fn target_on(&mut self, linux: bool) -> Result<String, String> {
+        let target = match self.target.take() {
+            Some(t) => match Target::parse(&t) {
+                Ok(_) => Some(t),
+                Err(e) if !looks_like_url(&t) => return Err(e),
+                Err(_) => {
+                    self.urls.insert(0, t);
+                    None
+                }
+            },
+            None => None,
+        };
+        for url in &mut self.urls {
+            if bare_loopback(url) {
+                url.insert_str(0, "http://");
+            }
+        }
+        match target {
+            Some(t) => Ok(t),
+            None if linux => Ok("local".into()),
+            None => Err(NEEDS_TARGET.into()),
+        }
+    }
+}
+
+const NEEDS_TARGET: &str = "a target is needed on macOS and Windows, such as ssh:HOST or docker:CONTAINER \
+    (see rembro --help); without one, rembro uses local, which works only on Linux because rembro's agent is a \
+    Linux program";
+
+/// Whether an argument that is not a target is a URL for the local target. Only web URLs and
+/// loopback addresses count, so a mistyped target such as dokcer://web stays an error.
+fn looks_like_url(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || bare_loopback(s)
+}
+
+/// A loopback address with no scheme, such as localhost:3000. Chromium takes `localhost:` for
+/// a scheme on its command line, and its debugging endpoint opens no URL without one.
+fn bare_loopback(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    ["localhost:", "127.", "["].iter().any(|p| lower.starts_with(p))
 }
 
 #[cfg(test)]
@@ -311,5 +367,47 @@ mod tests {
         assert_eq!(profile(&["--debug", "--profile", "work"], None).unwrap(), kept("work"));
         assert!(profile(&["--profile", "a", "--fork", "b"], None).is_err());
         assert!(profile(&["--fork", "a", "--temp-profile"], None).is_err());
+    }
+
+    fn target(args: &[&str], linux: bool) -> Result<(String, Vec<String>), String> {
+        let mut cli = Cli::try_parse_from(["rembro"].iter().chain(args)).map_err(|e| e.to_string())?;
+        let target = cli.browse.target_on(linux)?;
+        Ok((target, cli.browse.urls))
+    }
+
+    #[test]
+    fn targets() {
+        let ok = |t: &str, urls: &[&str]| Ok((t.to_string(), urls.iter().map(|u| u.to_string()).collect()));
+        assert_eq!(target(&[], true), ok("local", &[]));
+        assert_eq!(target(&["--debug", "--headless"], true), ok("local", &[]));
+        assert_eq!(target(&["--", "--incognito"], true), ok("local", &[]));
+        assert_eq!(target(&["sbx:myapp"], true), ok("sbx:myapp", &[]));
+        assert_eq!(target(&["localhost"], true), ok("localhost", &[]));
+        assert_eq!(target(&["ssh://me@box:2222"], true), ok("ssh://me@box:2222", &[]));
+        assert_eq!(target(&["docker:web", "http://api:8000"], true), ok("docker:web", &["http://api:8000"]));
+        assert_eq!(
+            target(&["sbx:myapp", "localhost:3000", "api:8000"], true),
+            ok("sbx:myapp", &["http://localhost:3000", "api:8000"])
+        );
+        // A URL in the target's place is the first URL, for the local target.
+        assert_eq!(target(&["http://localhost:3000"], true), ok("local", &["http://localhost:3000"]));
+        assert_eq!(
+            target(&["localhost:5173", "HTTPS://example.com/a,ssh:b"], true),
+            ok("local", &["http://localhost:5173", "HTTPS://example.com/a,ssh:b"])
+        );
+        assert_eq!(target(&["--debug", "127.0.0.1:8000"], true), ok("local", &["http://127.0.0.1:8000"]));
+        assert_eq!(target(&["[::1]:3000", "--no-watch"], true), ok("local", &["http://[::1]:3000"]));
+        // Anything else that is not a target stays an error, so a typo doesn't open a browser here.
+        for typo in ["sbx-myapp", "dokcer://web", "example.com:8080", "docker:", "ssh:box:http", "3000"] {
+            assert_eq!(target(&[typo], true), Err(Target::parse(typo).unwrap_err()), "{typo}");
+        }
+        // Elsewhere, local can't run, so a target has to be given.
+        assert_eq!(target(&[], false), Err(NEEDS_TARGET.into()));
+        assert_eq!(target(&["http://localhost:3000"], false), Err(NEEDS_TARGET.into()));
+        assert_eq!(target(&["sbx:myapp"], false), ok("sbx:myapp", &[]));
+        // rembro run and rembro install still need one.
+        assert!(Cli::try_parse_from(["rembro", "run", "gimp"]).is_err());
+        assert!(Cli::try_parse_from(["rembro", "install"]).is_err());
+        assert!(Cli::try_parse_from(["rembro", "run", "ssh:box", "gimp"]).is_ok());
     }
 }

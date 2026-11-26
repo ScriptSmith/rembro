@@ -19,6 +19,8 @@ This page covers targets, containers and VMs, choosing a browser, profiles, open
 
 `localhost` is another name for `local`, and `kube:` and `kubectl:` are other names for `k8s:`. A `//` after the colon is ignored, so `ssh://me@box:2222` also works.
 
+With no target, rembro uses `local`. `rembro` then opens this machine's dev servers, and `rembro --debug` gives programs on this machine a browser to drive. When the first argument is not a target but starts with `http://`, `https://`, `localhost:`, `127.` or `[`, it is the first URL and the target is `local`, as in `rembro localhost:5173`. Any other first argument has to be a target, and a mistyped one such as `sbx-myapp` is an error rather than a URL. `rembro run` and `rembro install` always need a target. On macOS and Windows, where `local` can't run, leaving out the target is an error.
+
 `exec:` splits COMMAND into words the way a shell would, without expansions, and appends its own arguments to them as separate words. That suits the `exec` subcommands of container tools. It does not quote the arguments for a remote shell, so rembro refuses an `exec:` command that runs `ssh`. Use `ssh:`, or a chain such as `ssh:box,docker:web`, and put ssh options in your ssh config.
 
 The target must run Linux, and needs only `sh` and a writable directory. [How it works](how-it-works.md#the-agent) describes what rembro copies there.
@@ -123,6 +125,8 @@ Chromium is configured with command-line flags only, so rembro can use a regular
 
 With no URL, rembro looks for HTTP servers on the target's loopback. It takes the ports that are listening on a loopback or wildcard address, sends each one a `GET /`, and opens a tab at `http://localhost:PORT` for each one that answers with HTTP.
 
+rembro adds `http://` to a URL that starts with `localhost:`, `127.` or `[`, since Chromium doesn't always open those without it.
+
 `--ports` (or `REMBRO_PORTS`) says which ports to look at: single ports such as `8080`, ranges such as `3000-3999`, patterns such as `41xx`, a comma-separated list of those, `all` or `none`. The default is `1-32767`, because Linux hands out ports from 32768 up to programs that bind port 0, such as language servers and debug adapters. rembro leaves out the ports it listens on itself in the target, for `--debug` and X11.
 
 While the browser is open, rembro checks the target's listening ports every two seconds and opens a tab for each new HTTP server, giving a server 20 seconds to start answering. Each port is considered once: a port that was listening when rembro started, or that rembro has seen before, doesn't get a new tab. Watching is on by default when you give no URL. `--watch` turns it on when you do, and `--no-watch` turns it off.
@@ -191,7 +195,7 @@ Sound plays here when `PULSE_SERVER` names a PulseAudio server on this machine, 
 ## Options
 
 ```
-rembro [OPTIONS] TARGET [URL]... [-- BROWSER_ARGS...]
+rembro [OPTIONS] [TARGET] [URL]... [-- BROWSER_ARGS...]
 rembro run [OPTIONS] TARGET COMMAND [ARGS]...
 rembro install [OPTIONS] TARGET [BROWSER]
 rembro profiles [--prune DAYS]

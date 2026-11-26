@@ -346,7 +346,7 @@ fn connect(target_arg: &str, common: &Common) -> Result<Session, String> {
     })
 }
 
-pub fn run(cli: Cli) -> Result<i32, String> {
+pub fn run(mut cli: Cli) -> Result<i32, String> {
     match &cli.command {
         Some(Command::Run(r)) => {
             let s = connect(&r.target, &cli.common)?;
@@ -362,11 +362,11 @@ pub fn run(cli: Cli) -> Result<i32, String> {
         }
         Some(Command::Profiles(p)) => profile::command(p),
         None => {
-            let b = &cli.browse;
-            let target = b.target.as_deref().unwrap_or_default();
+            let b = &mut cli.browse;
+            let target = b.take_target()?;
             let ports = PortSpec::parse(&b.ports)?;
             b.debug_port()?;
-            let s = connect(target, &cli.common)?;
+            let s = connect(&target, &cli.common)?;
             let result = if b.remote { remote::run(b, &s, &ports) } else { local::run(b, &s, &ports) };
             s.close();
             result
