@@ -39,7 +39,31 @@ rembro install docker:shop-web-1 firefox         # put a browser in the containe
 curl -fsSL https://raw.githubusercontent.com/ScriptSmith/rembro/main/install.sh | sh
 ```
 
-`npx @scriptsmith/rembro` and `uvx rembro` run it from npm and PyPI without installing it, and `npm install -g @scriptsmith/rembro`, `uv tool install rembro` and `pipx install rembro` install it from there. These packages include the Linux builds that rembro copies into targets, so the only file rembro downloads on first use is waypipe, when it needs it ([details](docs/install.md#with-npm-uv-or-pipx)).
+To run it from npm or PyPI without installing it:
+
+```sh
+npx @scriptsmith/rembro
+```
+
+```sh
+uvx rembro
+```
+
+To install it from there:
+
+```sh
+npm install -g @scriptsmith/rembro
+```
+
+```sh
+uv tool install rembro
+```
+
+```sh
+pipx install rembro
+```
+
+These packages include the Linux builds that rembro copies into targets ([details](docs/install.md#with-npm-uv-or-pipx)).
 
 You can also download rembro from the [latest release](https://github.com/ScriptSmith/rembro/releases/latest).
 
