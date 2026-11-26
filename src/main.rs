@@ -15,6 +15,7 @@ mod proto;
 mod remote;
 mod run;
 mod socks;
+mod stealth;
 mod sys;
 mod target;
 mod util;

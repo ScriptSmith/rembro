@@ -14,7 +14,7 @@ use crate::host::{self, DEBUG_ID, Endpoint, HostEvent, Limiter, Session};
 use crate::proto::{Call, Event};
 use crate::target::Target;
 use crate::util::{self, PortSpec};
-use crate::{profile, socks, sys};
+use crate::{profile, socks, stealth, sys};
 
 /// Removes a directory when dropped.
 pub struct TempDir(pub PathBuf);
@@ -149,7 +149,18 @@ fn apply_files(files: Vec<(String, Edit)>) -> Result<(), String> {
     for (path, edit) in files {
         let data = match edit {
             Edit::Replace(d) => d,
-            Edit::Block(block) => browser::apply_block(fs::read_to_string(&path).ok().as_deref(), &block).into_bytes(),
+            Edit::Block(block) => {
+                let old = fs::read_to_string(&path).ok();
+                // Firefox keeps the prefs from rembro's last block in prefs.js. Those that this
+                // block no longer sets, such as --stealth's language, go back to their defaults.
+                let prefs = Path::new(&path).with_file_name("prefs.js");
+                if let Ok(text) = fs::read_to_string(&prefs)
+                    && let Some(text) = browser::forget_prefs(&text, old.as_deref(), &block)
+                {
+                    fs::write(&prefs, text).map_err(|e| format!("cannot write {}: {e}", prefs.display()))?;
+                }
+                browser::apply_block(old.as_deref(), &block).into_bytes()
+            }
         };
         if let Some(parent) = Path::new(&path).parent() {
             let _ = fs::create_dir_all(parent);
@@ -236,6 +247,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if debug.is_some() {
         profile::check_debug(&b.profile_arg(), &browser)?;
     }
+    let stealth = stealth::prepare(b, s, &browser)?;
     if debug.is_some() && s.target != Target::Local {
         eprintln!(
             "rembro: the browser runs on this machine, so programs in {} that drive it can read files it can open \
@@ -352,9 +364,15 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             new_instance: first && !busy,
             temporary,
             verbose: s.verbose,
+            stealth: stealth.as_ref(),
         })
     };
     let launch = launch_for(&urls, true)?;
+    if s.verbose {
+        for change in &launch.stealth {
+            eprintln!("rembro: --stealth {change}");
+        }
+    }
     // Guards that undo rembro's changes to a profile it did not create, once the browser exits.
     let mut _restore = None;
     let mut _untrust = None;

@@ -1,6 +1,6 @@
 # Using rembro
 
-This page covers targets, containers and VMs, choosing a browser, profiles, opening pages, letting a program drive the browser, `rembro run`, `rembro install`, displays on macOS and Windows, and the command-line options.
+This page covers targets, containers and VMs, choosing a browser, profiles, opening pages, letting a program drive the browser, `--stealth`, `rembro run`, `rembro install`, displays on macOS and Windows, and the command-line options.
 
 ## Targets
 
@@ -195,6 +195,40 @@ With `--debug`, rembro starts Chromium with four flags that Playwright also pass
 
 Without `--remote`, the browser runs on this machine, so a program in the target that drives it can read your files. [Security](security.md#debugging) has the details.
 
+### Looking like an ordinary browser
+
+Bot and scraping checks look for the flags and settings that automation gives a browser, and compare its timezone and language with where its traffic comes from. `--stealth` leaves out the flags and prefs that rembro adds and that pages can detect, and when the browser runs here, gives it the target's timezone and language. It works with or without `--debug`.
+
+For Chromium, `--stealth` changes these:
+
+- Temporary profiles don't get `--disable-component-update`, so Chromium downloads its components into each one as a new install does, the Widevine module among them, about a minute into the session. On Linux, Chromium loads Widevine only when it starts, so in a new temporary profile pages that ask for the `com.widevine.alpha` key system get an error for the whole session. A profile kept with `--profile` has Widevine from its second session on, and so do forks of it. Google Chrome ships with Widevine and has it from the start.
+- Chromium sets `navigator.webdriver` to true when it has a debugging port, so with `--debug` it gets `--disable-blink-features=AutomationControlled`, which turns that off. A windowed Chromium shows a warning bar about that flag in its first tab, which makes the page there shorter.
+- With `--debug`, Chromium gets `--enable-features=CDPScreenshotNewSurface` but not the three flags that keep it from throttling pages in background tabs and in covered or minimized windows. A page there runs its timers slower, as it would for anyone, and a program that drives it may wait while its window is out of sight.
+- Headless Chromium puts `HeadlessChrome` in its user agent and renders WebGL with SwiftShader even where there is a GPU. With `--stealth` it gets a `--user-agent` that says `Chrome` with its own major version, and `--enable-gpu` with `--enable-unsafe-swiftshader`, so WebGL uses the GPU where there is one and SwiftShader where there isn't. A `--user-agent` of your own after `--` takes the place of rembro's.
+- With `--remote`, Chromium doesn't get `--disable-gpu`. Through Wayland it then uses the target's GPU if it has one. Through X11 it can't use a GPU, and pages find WebGL missing either way.
+
+Firefox has nothing for `--stealth` to leave out unless `--debug` is given. While its remote agent runs, Firefox sets `navigator.webdriver` to true, and no pref turns that off ([Mozilla bug 1719505](https://bugzilla.mozilla.org/show_bug.cgi?id=1719505)), so rembro refuses `--stealth` with `--debug` in Firefox.
+
+rembro keeps the settings that hold the browser's traffic inside the target, which are Chromium's `--host-resolver-rules` and WebRTC policy, and Firefox's DNS, DNS over HTTPS, HTTP/3 and WebRTC prefs ([How it works](how-it-works.md#networking-when-the-browser-runs-here)). A page can tell that the browser never uses HTTP/3, but a page that learnt this machine's address or DNS server as well as the target's would have a stronger sign.
+
+When the browser runs here, it gets the target's timezone and language where the target names them:
+
+- The timezone comes from the target's `TZ`, or else the link at `/etc/localtime`, or else `/etc/timezone`, and counts only when it names a place, such as `America/New_York`. `UTC` and the `Etc/` zones don't count. A container usually has UTC because nobody set a zone in it, and a container on this machine shares this machine's address, so the browser keeps this machine's timezone then. rembro sets `TZ` for the browser.
+- The language comes from the target's `LC_ALL`, `LC_MESSAGES` or `LANG`, or from `/etc/locale.conf` or `/etc/default/locale` when none of them is set, and counts unless it is `C`, `POSIX` or `C.UTF-8`. Chromium gets it in `LANGUAGE` on Linux and in `--lang` on Windows, which also changes the language of its menus. Firefox gets `intl.accept_languages` and `intl.locale.requested`, which change `navigator.languages` and the `Accept-Language` header; `Intl` keeps formatting dates in Firefox's own language unless the language pack for the target's is installed. A later session that starts the same Firefox profile without them takes them out of the profile again.
+- On Windows, Chromium and Firefox take the timezone from Windows and ignore `TZ`, so the browser keeps this machine's timezone. On macOS, Chromium takes its language from macOS, so there only Firefox gets the target's language. Epiphany and MiniBrowser get the timezone but not the language.
+- With `--loopback-only`, the browser connects to other sites from this machine, so it keeps this machine's timezone and language. With `--remote`, it has the target's own.
+
+`--verbose` lists each flag, environment variable and pref that `--stealth` changes.
+
+`--stealth` can't hide:
+
+- A new profile. Each temporary profile starts with no cookies, history or saved components. Keep one with `--profile` to build them up.
+- What a program that drives the browser does, such as calling `Runtime.enable` over CDP, which Playwright and Puppeteer do and some bot checks detect.
+- Headless Chromium's 800x600 screen, and the empty architecture, bitness and full version that `navigator.userAgentData.getHighEntropyValues()` gives once `--user-agent` replaces Chromium's own. Leave out `--headless` where these matter.
+- Missing or software WebGL with `--remote`. In a target without a GPU, windowed Chromium has no WebGL and headless Chromium renders it with SwiftShader, and a Chromium whose window comes through X11 has no WebGL whatever the target has. rembro warns about both, taking a target without `/dev/dri` or `/dev/dxg` to have no GPU.
+- `--no-sandbox` in a target that runs Chromium as root, which Chromium needs there and shows a warning bar about.
+- Firefox's `navigator.webdriver` with `--debug`, as above.
+
 ## Running other programs
 
 `rembro run TARGET COMMAND [ARGS]...` runs any program in the target with the same display, sound and `BROWSER` setup as `--remote`. Its output comes back on rembro's stdout and stderr, and rembro exits with its exit status. Its stdin is not connected, so use `ssh` or `docker exec -it` for interactive terminal programs.
@@ -247,6 +281,8 @@ rembro profiles [--prune DAYS]
     --debug[=PORT]        expose the browser's debugging endpoint on the target's
                           127.0.0.1:PORT (default 9222, or a free port)
     --headless            run the browser with no window (needs --debug)
+    --stealth             leave out the flags and prefs that pages can detect, and
+                          use the target's timezone and language
     --ports PORTS         where to look for HTTP servers: ports such as 8080, ranges
                           such as 3000-3999, patterns such as 41xx, all or none
                           (default 1-32767; also REMBRO_PORTS)

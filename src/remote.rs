@@ -18,7 +18,7 @@ use crate::mux::Sock;
 use crate::proto::{Addr, Call, Event, Open, Opened, ProfileSpec};
 use crate::target::Target;
 use crate::util::{self, PortSpec};
-use crate::{fetch, profile, sys, x11};
+use crate::{fetch, profile, stealth, sys, x11};
 
 fn resolve(s: &Session, choice: &str, family: Option<Family>) -> Result<Resolved, String> {
     let choices = browser::choices(choice, family, browser::Os::Linux)?;
@@ -378,6 +378,7 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     if debug.is_some() {
         profile::check_debug(&b.profile_arg(), &browser)?;
     }
+    let stealth = stealth::prepare(b, s, &browser)?;
     let mut gui_opts = b.gui.clone();
     if b.headless {
         gui_opts.display = DisplayArg::None;
@@ -394,6 +395,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
     }
     let gui = setup_gui(s, &gui_opts, &dir, !b.headless)?;
     let gui_kind = if b.headless { Gui::Headless } else { gui.gui.unwrap_or(Gui::X11) };
+    if stealth.is_some() {
+        stealth::check_webgl(s, browser.family, gui_kind);
+    }
     let started = Instant::now();
     s.call::<String>(&Call::Shim)?;
 
@@ -468,9 +472,15 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             new_instance: first && !busy,
             temporary,
             verbose: s.verbose,
+            stealth: stealth.as_ref(),
         })
     };
     let launch = launch_for(&urls, true)?;
+    if s.verbose {
+        for change in &launch.stealth {
+            eprintln!("rembro: --stealth {change}");
+        }
+    }
     if s.info.uid == 0 && browser.family == Family::Chromium {
         eprintln!("rembro: {} runs this as root, so Chromium's sandbox is off", s.label);
     }
@@ -612,7 +622,7 @@ fn old_chromium(s: &Session, browser: &Resolved) -> Option<u32> {
 }
 
 /// The major version in output such as "Chromium 90.0.4430.212 built on Debian 10.9".
-fn chromium_major(version: &str) -> Option<u32> {
+pub fn chromium_major(version: &str) -> Option<u32> {
     version
         .split_whitespace()
         .find(|w| {

@@ -158,6 +158,12 @@ pub struct Browse {
     #[arg(long, requires = "debug")]
     pub headless: bool,
 
+    /// Leave out the browser flags and settings that pages can use to tell an automated
+    /// browser from a person's, and when the browser runs here, give it the target's
+    /// timezone and language. Firefox can't hide --debug, so rembro refuses the two together
+    #[arg(long)]
+    pub stealth: bool,
+
     /// Ports to look for HTTP servers on: ranges like 3000-3999, patterns like 41xx,
     /// `all` or `none`
     #[arg(long, env = "REMBRO_PORTS", default_value = "1-32767", value_name = "PORTS")]

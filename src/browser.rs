@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
-use crate::util;
+use crate::stealth::{self, Stealth};
+use crate::{profile, util};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -463,6 +464,7 @@ pub fn resolve_local(browser: &str, family: Option<Family>) -> Result<Resolved, 
     Err(format!("no browser found for {browser:?} on this machine; install one or pass --browser ({NAMES})"))
 }
 
+#[derive(Clone, Copy)]
 pub enum Net {
     /// The browser runs here and reaches the target through rembro's SOCKS server.
     Proxy { socks_port: u16, loopback_only: bool },
@@ -479,6 +481,7 @@ pub enum Gui {
     Headless,
 }
 
+#[derive(Clone, Copy)]
 pub struct Plan<'a> {
     pub browser: &'a Resolved,
     pub profile: &'a str,
@@ -496,6 +499,8 @@ pub struct Plan<'a> {
     /// The profile is deleted when the session ends.
     pub temporary: bool,
     pub verbose: bool,
+    /// With --stealth: leave out what pages can see, and use these settings.
+    pub stealth: Option<&'a Stealth>,
 }
 
 pub enum Edit {
@@ -513,6 +518,8 @@ pub struct Launch {
     pub files: Vec<(String, Edit)>,
     /// Pages that could not go on the command line, to open with `new_tab` once the browser runs.
     pub later: Vec<String>,
+    /// What --stealth changed, for --verbose.
+    pub stealth: Vec<String>,
 }
 
 pub const BLOCK_BEGIN: &str = "// rembro begin: rewritten each time rembro starts this profile";
@@ -540,6 +547,37 @@ pub fn apply_block(existing: Option<&str>, block: &str) -> String {
     out
 }
 
+/// Firefox's prefs.js without the lines that rembro's block in `existing` set and `block`
+/// doesn't, or None if it has none of them. Lines that the browser changed since stay.
+pub fn forget_prefs(prefs_js: &str, existing: Option<&str>, block: &str) -> Option<String> {
+    let keep = profile::pref_keys(block);
+    let mut inside = false;
+    let mut gone = Vec::new();
+    for line in existing.unwrap_or("").lines() {
+        if line.starts_with("// rembro begin") {
+            inside = true;
+        } else if line == BLOCK_END {
+            inside = false;
+        } else if inside {
+            let keys = profile::pref_keys(line);
+            if !keys.is_empty() && keys.iter().all(|k| !keep.contains(k)) {
+                gone.push(line.trim());
+            }
+        }
+    }
+    let mut changed = false;
+    let out = prefs_js
+        .lines()
+        .filter(|l| {
+            let drop = gone.contains(&l.trim());
+            changed |= drop;
+            !drop
+        })
+        .map(|l| format!("{l}\n"))
+        .collect();
+    changed.then_some(out)
+}
+
 fn pac(socks_port: u16) -> String {
     format!(
         "function FindProxyForURL(url, host) {{\n  \
@@ -562,6 +600,14 @@ fn gui_env(l: &mut Launch, gui: Gui) {
 }
 
 pub fn launch(p: &Plan) -> Result<Launch, String> {
+    let mut l = build(p)?;
+    if p.stealth.is_some() {
+        l.stealth = stealth::changes(&build(&Plan { stealth: None, ..*p })?, &l);
+    }
+    Ok(l)
+}
+
+fn build(p: &Plan) -> Result<Launch, String> {
     let mut l = Launch { argv: vec![p.browser.path.clone()], ..Default::default() };
     let profile = p.profile.trim_end_matches('/');
     let unsupported_debug = || {
@@ -583,9 +629,9 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             if let Some(dir) = p.profile_directory {
                 l.argv.push(format!("--profile-directory={dir}"));
             }
-            if p.temporary {
+            if p.temporary && p.stealth.is_none() {
                 // Chromium would otherwise download over 100 MB of components, such as
-                // Widevine, into each new profile.
+                // Widevine, into each new profile. Pages can tell when Widevine is missing.
                 l.argv.push("--disable-component-update".into());
             }
             if let Net::Proxy { socks_port, loopback_only } = p.net {
@@ -612,7 +658,12 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                 ]),
                 Gui::Wayland | Gui::X11 => {
                     l.argv.push(format!("--ozone-platform={}", if p.gui == Gui::Wayland { "wayland" } else { "x11" }));
-                    l.argv.extend(["--disable-gpu".into(), "--password-store=basic".into()]);
+                    // Pages then find no WebGL, so --stealth lets Chromium use a GPU in the target,
+                    // which it can through Wayland.
+                    if p.stealth.is_none() {
+                        l.argv.push("--disable-gpu".into());
+                    }
+                    l.argv.push("--password-store=basic".into());
                     if !p.verbose {
                         l.argv.push("--log-level=3".into());
                     }
@@ -622,6 +673,15 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                         l.unset.push("WAYLAND_DISPLAY".into());
                     }
                 }
+            }
+            if p.gui == Gui::Headless
+                && let Some(st) = p.stealth
+            {
+                // Headless Chromium puts HeadlessChrome in its user agent, and renders WebGL with
+                // SwiftShader even when there is a GPU. --enable-gpu alone turns WebGL off where
+                // there is none, so SwiftShader stays the fallback.
+                l.argv.extend(st.user_agent.iter().map(|ua| format!("--user-agent={ua}")));
+                l.argv.extend(["--enable-gpu".into(), "--enable-unsafe-swiftshader".into()]);
             }
             if p.root {
                 l.argv.push("--no-sandbox".into());
@@ -633,12 +693,27 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                 l.argv.push(format!("--remote-debugging-port={port}"));
                 // Playwright's flags for the same problem: without them, a page in a minimized,
                 // covered or background window is throttled, and screenshots of it never finish.
-                l.argv.extend([
-                    "--enable-features=CDPScreenshotNewSurface".into(),
-                    "--disable-backgrounding-occluded-windows".into(),
-                    "--disable-renderer-backgrounding".into(),
-                    "--disable-background-timer-throttling".into(),
-                ]);
+                // Pages can tell that their timers keep full speed there, so --stealth leaves out
+                // all but the screenshot feature.
+                l.argv.push("--enable-features=CDPScreenshotNewSurface".into());
+                if p.stealth.is_none() {
+                    l.argv.extend([
+                        "--disable-backgrounding-occluded-windows".into(),
+                        "--disable-renderer-backgrounding".into(),
+                        "--disable-background-timer-throttling".into(),
+                    ]);
+                } else {
+                    // A debugging port sets navigator.webdriver.
+                    l.argv.push("--disable-blink-features=AutomationControlled".into());
+                }
+            }
+            // Chromium takes its language from --lang on Windows, and from the environment on Linux.
+            if let Some(lang) = p.stealth.and_then(|st| st.language.as_deref()) {
+                if Os::HERE == Os::Windows {
+                    l.argv.push(format!("--lang={lang}"));
+                } else {
+                    l.env.push(("LANGUAGE".into(), lang.replace('-', "_")));
+                }
             }
         }
         Family::Firefox => {
@@ -695,6 +770,10 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
                         ("media.peerconnection.ice.proxy_only_if_behind_proxy", "true".into()),
                     ]);
                 }
+            }
+            if let Some(lang) = p.stealth.and_then(|st| st.language.as_deref()) {
+                prefs.push(("intl.locale.requested", format!("{lang:?}")));
+                prefs.push(("intl.accept_languages", format!("{:?}", stealth::accept_languages(lang))));
             }
             let block: String = prefs.iter().map(|(k, v)| format!("user_pref(\"{k}\", {v});\n")).collect();
             l.files.push((format!("{profile}/user.js"), Edit::Block(block)));
@@ -762,6 +841,9 @@ pub fn launch(p: &Plan) -> Result<Launch, String> {
             l.argv.push(format!("--user-data-dir={profile}"));
             gui_env(&mut l, p.gui);
         }
+    }
+    if let Some(tz) = p.stealth.and_then(|st| st.timezone.as_deref()) {
+        l.env.push(("TZ".into(), tz.into()));
     }
     l.argv.extend(p.extra.iter().cloned());
     // Headless Chromium refuses to start with more than one page on its command line.
@@ -873,6 +955,7 @@ mod tests {
             new_instance: true,
             temporary: false,
             verbose: false,
+            stealth: None,
         })
         .unwrap();
         assert!(l.argv.contains(&"--proxy-bypass-list=*;<-loopback>".to_string()));
@@ -896,6 +979,7 @@ mod tests {
             new_instance: true,
             temporary: false,
             verbose: false,
+            stealth: None,
         })
         .unwrap();
         assert!(l.argv.contains(&"--headless".to_string()));
@@ -917,9 +1001,131 @@ mod tests {
             new_instance: true,
             temporary: false,
             verbose: false,
+            stealth: None,
         })
         .unwrap();
         assert!(l.argv.contains(&"--user-data-dir=/home/u/.config/chromium".to_string()));
         assert!(l.argv.contains(&"--profile-directory=Profile 1".to_string()));
+    }
+
+    fn plan<'a>(b: &'a Resolved, urls: &'a [String]) -> Plan<'a> {
+        Plan {
+            browser: b,
+            profile: "/p",
+            profile_directory: None,
+            net: Net::Proxy { socks_port: 1080, loopback_only: false },
+            gui: Gui::Host,
+            debug_port: None,
+            urls,
+            extra: &[],
+            root: false,
+            small_shm: false,
+            new_instance: true,
+            temporary: true,
+            verbose: false,
+            stealth: None,
+        }
+    }
+
+    #[test]
+    fn stealth_chromium_flags() {
+        let b = Resolved { name: "chromium".into(), family: Family::Chromium, path: "/usr/bin/chromium".into() };
+        let ua =
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36";
+        let st = Stealth {
+            user_agent: Some(ua.into()),
+            timezone: Some("America/New_York".into()),
+            language: Some("de-DE".into()),
+        };
+        let has = |l: &Launch, a: &str| l.argv.iter().any(|x| x == a);
+        let headless = Plan { gui: Gui::Headless, debug_port: Some(0), ..plan(&b, &[]) };
+
+        let l = launch(&headless).unwrap();
+        for a in [
+            "--disable-component-update",
+            "--enable-features=CDPScreenshotNewSurface",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        ] {
+            assert!(has(&l, a), "{a}");
+        }
+        assert!(!l.argv.iter().any(|a| a.starts_with("--user-agent")));
+        assert!(l.env.is_empty() && l.stealth.is_empty());
+
+        let l = launch(&Plan { stealth: Some(&st), ..headless }).unwrap();
+        for a in [
+            "--disable-component-update",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+        ] {
+            assert!(!has(&l, a), "{a}");
+        }
+        // What pages can't see, and what keeps this machine's address and DNS out of sight, stays.
+        for a in [
+            "--enable-features=CDPScreenshotNewSurface",
+            "--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1",
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--mute-audio",
+            "--disable-blink-features=AutomationControlled",
+            "--enable-gpu",
+            &format!("--user-agent={ua}"),
+        ] {
+            assert!(has(&l, a), "{a}");
+        }
+        assert!(l.argv.iter().any(|a| a.starts_with("--blink-settings=")));
+        assert!(l.env.contains(&("TZ".into(), "America/New_York".into())));
+        if Os::HERE == Os::Windows {
+            assert!(has(&l, "--lang=de-DE"));
+        } else {
+            assert!(l.env.contains(&("LANGUAGE".into(), "de_DE".into())));
+        }
+        assert!(l.stealth.contains(&"leaves out --disable-component-update".to_string()));
+        assert!(l.stealth.contains(&"sets TZ=America/New_York".to_string()));
+
+        // A debugging port sets navigator.webdriver, with a window or without.
+        let windowed = Plan { stealth: Some(&st), gui: Gui::Host, ..headless };
+        assert!(has(&launch(&windowed).unwrap(), "--disable-blink-features=AutomationControlled"));
+        let l = launch(&Plan { debug_port: None, ..windowed }).unwrap();
+        assert!(!l.argv.iter().any(|a| a.starts_with("--disable-blink-features")));
+
+        // In the target, with a window: no --disable-gpu, so a GPU there is used.
+        let remote = Plan { net: Net::Native, gui: Gui::X11, ..plan(&b, &[]) };
+        assert!(has(&launch(&remote).unwrap(), "--disable-gpu"));
+        let l = launch(&Plan { stealth: Some(&Stealth::default()), ..remote }).unwrap();
+        assert!(!has(&l, "--disable-gpu") && has(&l, "--password-store=basic"));
+        assert_eq!(l.stealth, ["leaves out --disable-component-update", "leaves out --disable-gpu"]);
+    }
+
+    #[test]
+    fn stealth_firefox_prefs() {
+        let b = Resolved { name: "firefox".into(), family: Family::Firefox, path: "/usr/bin/firefox".into() };
+        let block = |l: &Launch| match &l.files.last().unwrap().1 {
+            Edit::Block(b) => b.clone(),
+            Edit::Replace(_) => panic!("user.js is a block"),
+        };
+        let st =
+            Stealth { language: Some("de-DE".into()), timezone: Some("Europe/Berlin".into()), ..Default::default() };
+        let l = launch(&Plan { stealth: Some(&st), ..plan(&b, &[]) }).unwrap();
+        let prefs = block(&l);
+        assert!(prefs.contains("user_pref(\"intl.locale.requested\", \"de-DE\");\n"));
+        assert!(prefs.contains("user_pref(\"intl.accept_languages\", \"de-DE, de, en-US, en\");\n"));
+        assert!(prefs.contains("user_pref(\"network.http.http3.enable\", false);"));
+        assert!(prefs.contains("user_pref(\"dom.min_background_timeout_value\", 1000);"));
+        assert_eq!(l.env, [("TZ".to_string(), "Europe/Berlin".to_string())]);
+
+        // A later session without --stealth takes the language back out of prefs.js, unless
+        // the browser changed it since.
+        let user_js = apply_block(None, &prefs);
+        let plain = block(&launch(&plan(&b, &[])).unwrap());
+        let prefs_js = "user_pref(\"a\", 1);\nuser_pref(\"intl.accept_languages\", \"de-DE, de, en-US, en\");\n\
+                        user_pref(\"intl.locale.requested\", \"fr\");\nuser_pref(\"network.proxy.type\", 1);\n";
+        assert_eq!(
+            forget_prefs(prefs_js, Some(&user_js), &plain).unwrap(),
+            "user_pref(\"a\", 1);\nuser_pref(\"intl.locale.requested\", \"fr\");\nuser_pref(\"network.proxy.type\", 1);\n"
+        );
+        assert_eq!(forget_prefs(prefs_js, Some(&apply_block(None, &plain)), &plain), None);
+        assert_eq!(forget_prefs(prefs_js, None, &plain), None);
     }
 }
