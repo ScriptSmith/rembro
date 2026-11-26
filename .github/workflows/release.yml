@@ -16,7 +16,21 @@ env:
     armv7:armv7-unknown-linux-musleabihf
 
 jobs:
+  # A tag that doesn't match Cargo.toml stops here, before anything is built or released.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the tag against Cargo.toml
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::The tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+
   rembro:
+    needs: version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +56,7 @@ jobs:
           path: out/
 
   macos:
+    needs: version
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,6 +77,7 @@ jobs:
           path: out/
 
   windows:
+    needs: version
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +98,7 @@ jobs:
           path: out/
 
   waypipe:
+    needs: version
     runs-on: ubuntu-latest
     env:
       WAYPIPE_RUST_TOOLCHAIN: "1.100.0"
@@ -162,3 +179,23 @@ jobs:
           gh release create "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --generate-notes --notes-file ../notes.md \
             rembro-x86_64 rembro-aarch64 rembro-armv7 waypipe-x86_64 waypipe-aarch64 waypipe-armv7 \
             rembro-*-linux.tar.gz rembro-*-macos.tar.gz rembro-x86_64-windows.zip waypipe-source.tar.gz SHA256SUMS
+
+  # A cargo-installed rembro downloads its agents from the GitHub release of its own version,
+  # so the crate goes out once that release exists. One-time setup: in the crate's settings on
+  # crates.io, add a trusted publisher for ScriptSmith/rembro, workflow release.yml and
+  # environment crates-io.
+  crates-io:
+    needs: release
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
