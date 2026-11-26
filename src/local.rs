@@ -373,6 +373,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             eprintln!("rembro: --stealth {change}");
         }
     }
+    if stealth.is_some() {
+        stealth::check_widevine(s, &browser, &profile_str, false);
+    }
     // Guards that undo rembro's changes to a profile it did not create, once the browser exits.
     let mut _restore = None;
     let mut _untrust = None;

@@ -28,6 +28,19 @@ const SETTINGS: &str = r#"printf '%s\n' "TZ=$TZ" "LC_ALL=$LC_ALL" "LC_MESSAGES=$
   "localtime=$(readlink /etc/localtime 2>/dev/null)" "timezone=$(cat /etc/timezone 2>/dev/null)"
 sed -n 's/^LANG=/conf=/p' /etc/locale.conf /etc/default/locale 2>/dev/null"#;
 
+/// Exits with 0 when Chromium on Linux finds Widevine as it starts: in the profile, $2, where
+/// Chromium downloads it, or beside the browser, $1, or beside what $1 runs when it is a
+/// script, which is where Google Chrome ships it.
+const WIDEVINE: &str = r#"[ -d "$2/WidevineCdm" ] && exit 0
+exe=$(readlink -f "$1") || exit 1
+[ -d "${exe%/*}/WidevineCdm" ] && exit 0
+[ "$(head -c 2 "$exe")" = '#!' ] || exit 1
+set -f
+for word in $(sed -n 's/^[[:space:]]*exec[[:space:]]//p' "$exe" | tr "\"'" '  '); do
+  case $word in /*) word=$(readlink -f "$word") && [ -d "${word%/*}/WidevineCdm" ] && exit 0 ;; esac
+done
+exit 1"#;
+
 /// Refuses what --stealth can't do with this browser at all.
 pub fn refuse(family: Family, debug: bool) -> Result<(), String> {
     if family == Family::Firefox && debug {
@@ -88,6 +101,38 @@ pub fn check_webgl(s: &Session, family: Family, gui: Gui) {
             s.label
         );
     }
+}
+
+/// Says when pages will find Widevine missing from a Chromium on Linux, which loads it only as
+/// it starts, so a profile without it goes without it for the whole session.
+pub fn check_widevine(s: &Session, browser: &Resolved, profile: &str, remote: bool) {
+    if browser.family != Family::Chromium || !remote && Os::HERE != Os::Linux {
+        return;
+    }
+    let found = if remote {
+        let argv = ["sh", "-c", WIDEVINE, "sh", &browser.path, profile].map(String::from).into();
+        matches!(s.call::<(Option<i32>, String)>(&Call::Capture { argv, timeout_ms: 10_000 }), Ok((Some(0), _)))
+    } else {
+        widevine_here(&browser.path, profile)
+    };
+    if !found {
+        eprintln!(
+            "rembro: this profile has no Widevine, and Chromium on Linux loads it only as it starts, so pages in this \
+             session find it missing. To get it, keep a profile with --profile NAME and let one session run until \
+             Chromium has downloaded Widevine, a minute or so; later sessions with --profile NAME or --fork NAME have it"
+        );
+    }
+}
+
+/// Whether a Chromium here finds Widevine as it starts.
+fn widevine_here(browser: &str, profile: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", WIDEVINE, "sh", browser, profile])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|st| st.success())
 }
 
 /// Takes the target's timezone and language for the browser, where they name a place and a
@@ -338,5 +383,31 @@ mod tests {
         assert!(refuse(Family::Firefox, true).unwrap_err().contains("navigator.webdriver"));
         assert!(refuse(Family::Firefox, false).is_ok());
         assert!(refuse(Family::Chromium, true).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn widevine() {
+        let dir = crate::util::mkdtemp(&std::env::temp_dir(), "rembro-test-").unwrap();
+        let path = |p: &str| dir.join(p).to_string_lossy().into_owned();
+        for d in ["profile", "bin", "opt/chrome/WidevineCdm", "opt/chromium"] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        fs::write(dir.join("opt/chrome/chrome"), "\x7fELF").unwrap();
+        fs::write(dir.join("opt/chromium/chromium"), "\x7fELF").unwrap();
+        std::os::unix::fs::symlink(dir.join("opt/chrome/chrome"), dir.join("bin/chrome")).unwrap();
+        let wrapper = |to: &str| format!("#!/bin/sh\nexec '{}' $FLAGS \"$@\"\n", path(to));
+        fs::write(dir.join("bin/google-chrome"), wrapper("opt/chrome/chrome")).unwrap();
+        fs::write(dir.join("bin/chromium"), wrapper("opt/chromium/chromium")).unwrap();
+        let has = |browser: &str| widevine_here(&path(browser), &path("profile"));
+        // Google Chrome ships it, found through a symbolic link or a script that runs it.
+        for chrome in ["opt/chrome/chrome", "bin/chrome", "bin/google-chrome"] {
+            assert!(has(chrome), "{chrome}");
+        }
+        assert!(!has("opt/chromium/chromium") && !has("bin/chromium"));
+        // Chromium downloaded it into the profile.
+        fs::create_dir(dir.join("profile/WidevineCdm")).unwrap();
+        assert!(has("bin/chromium"));
+        fs::remove_dir_all(dir).unwrap();
     }
 }

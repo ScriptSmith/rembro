@@ -481,6 +481,9 @@ pub fn run(b: &Browse, s: &Session, ports: &PortSpec) -> Result<i32, String> {
             eprintln!("rembro: --stealth {change}");
         }
     }
+    if stealth.is_some() {
+        stealth::check_widevine(s, &browser, &profile, true);
+    }
     if s.info.uid == 0 && browser.family == Family::Chromium {
         eprintln!("rembro: {} runs this as root, so Chromium's sandbox is off", s.label);
     }

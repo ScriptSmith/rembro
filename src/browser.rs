@@ -503,6 +503,16 @@ pub struct Plan<'a> {
     pub stealth: Option<&'a Stealth>,
 }
 
+impl Plan<'_> {
+    /// The system the browser runs on: this machine's, or Linux in a target.
+    fn os(&self) -> Os {
+        match self.net {
+            Net::Proxy { .. } => Os::HERE,
+            Net::Native => Os::Linux,
+        }
+    }
+}
+
 pub enum Edit {
     /// Replace the file.
     Replace(Vec<u8>),
@@ -629,9 +639,11 @@ fn build(p: &Plan) -> Result<Launch, String> {
             if let Some(dir) = p.profile_directory {
                 l.argv.push(format!("--profile-directory={dir}"));
             }
-            if p.temporary && p.stealth.is_none() {
-                // Chromium would otherwise download over 100 MB of components, such as
-                // Widevine, into each new profile. Pages can tell when Widevine is missing.
+            // Chromium would otherwise download over 100 MB of components, such as Widevine,
+            // into each new profile. Pages can tell when Widevine is missing, so --stealth lets
+            // it download them, except on Linux, where Chromium loads Widevine only as it starts
+            // and a new profile goes without it anyway.
+            if p.temporary && (p.stealth.is_none() || p.os() == Os::Linux) {
                 l.argv.push("--disable-component-update".into());
             }
             if let Net::Proxy { socks_port, loopback_only } = p.net {
@@ -1055,7 +1067,6 @@ mod tests {
 
         let l = launch(&Plan { stealth: Some(&st), ..headless }).unwrap();
         for a in [
-            "--disable-component-update",
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
             "--disable-renderer-backgrounding",
@@ -1081,7 +1092,10 @@ mod tests {
         } else {
             assert!(l.env.contains(&("LANGUAGE".into(), "de_DE".into())));
         }
-        assert!(l.stealth.contains(&"leaves out --disable-component-update".to_string()));
+        // Chromium on Linux loads Widevine only as it starts, so a temporary profile there gains
+        // nothing from downloading it.
+        assert_eq!(has(&l, "--disable-component-update"), Os::HERE == Os::Linux);
+        assert_eq!(l.stealth.contains(&"leaves out --disable-component-update".to_string()), Os::HERE != Os::Linux);
         assert!(l.stealth.contains(&"sets TZ=America/New_York".to_string()));
 
         // A debugging port sets navigator.webdriver, with a window or without.
@@ -1090,12 +1104,14 @@ mod tests {
         let l = launch(&Plan { debug_port: None, ..windowed }).unwrap();
         assert!(!l.argv.iter().any(|a| a.starts_with("--disable-blink-features")));
 
-        // In the target, with a window: no --disable-gpu, so a GPU there is used.
+        // In the target, with a window: no --disable-gpu, so a GPU there is used. The target
+        // runs Linux, so a temporary profile keeps --disable-component-update on any system.
         let remote = Plan { net: Net::Native, gui: Gui::X11, ..plan(&b, &[]) };
         assert!(has(&launch(&remote).unwrap(), "--disable-gpu"));
         let l = launch(&Plan { stealth: Some(&Stealth::default()), ..remote }).unwrap();
         assert!(!has(&l, "--disable-gpu") && has(&l, "--password-store=basic"));
-        assert_eq!(l.stealth, ["leaves out --disable-component-update", "leaves out --disable-gpu"]);
+        assert!(has(&l, "--disable-component-update"));
+        assert_eq!(l.stealth, ["leaves out --disable-gpu"]);
     }
 
     #[test]
